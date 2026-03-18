@@ -75,6 +75,27 @@ def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
             content = message.content[0].text
         except Exception as e:
             return {"error": f"Failed to call Claude API: {e}"}
+            
+    elif provider.lower() == "openai":
+        try:
+            import openai
+        except ImportError:
+            return {"error": "openai SDK not installed. Please install it with: pip install openai"}
+        
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return {"error": "OPENAI_API_KEY environment variable not set"}
+            
+        try:
+            client = openai.OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            content = response.choices[0].message.content
+        except Exception as e:
+            return {"error": f"Failed to call OpenAI API: {e}"}
+            
     else:
         return {"error": f"Unsupported provider: {provider}"}
         
