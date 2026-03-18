@@ -2,7 +2,9 @@
 
 **Parse any TTRPG adventure PDF into a ready-to-use Obsidian vault.**
 
-Tome is a local MCP (Model Context Protocol) server that helps Game Masters process existing tabletop RPG materials — not generate new content. It acts as a librarian: parsing, organizing, and reformatting content from adventure books into interconnected, searchable Obsidian notes.
+> **Important Note:** Tome's purpose is to *parse human-written content*, **not** generate new AI content. It simply uses AI to help extract and organize existing text from your adventure modules into structured notes.
+
+Tome is a local MCP (Model Context Protocol) server that helps Game Masters process existing tabletop RPG materials. It acts as a librarian: parsing, organizing, and reformatting content from adventure books into interconnected, searchable Obsidian notes.
 
 ## Quick Start
 
@@ -17,6 +19,47 @@ venv/bin/python -m unittest test_obsidian.py -v
 Environment variables (`.env` file at project root):
 - `GEMINI_API_KEY` — required for entity extraction with Gemini (default)
 - `ANTHROPIC_API_KEY` — required for entity extraction with Claude
+- `OPENAI_API_KEY` — required for entity extraction with OpenAI (gpt-4o)
+
+## Integrating with Chat Apps (For Non-Technical Users)
+
+You can easily use Tome directly within your favorite AI chat applications using the Model Context Protocol (MCP). Here's how to set it up:
+
+### Claude Desktop
+1. Open Claude Desktop.
+2. Go to **Settings** -> **Developer** and click **Edit Config**.
+3. This will open the `claude_desktop_config.json` file. Add the following to the `mcpServers` section:
+   ```json
+   {
+     "mcpServers": {
+       "tome": {
+         "command": "/absolute/path/to/Tome/venv/bin/python",
+         "args": ["/absolute/path/to/Tome/server.py"],
+         "env": {
+           "GEMINI_API_KEY": "your_gemini_key_here",
+           "OPENAI_API_KEY": "your_openai_key_here",
+           "ANTHROPIC_API_KEY": "your_anthropic_key_here"
+         }
+       }
+     }
+   }
+   ```
+   *(Make sure to replace `/absolute/path/to/Tome` with the actual path to your Tome folder, and fill in at least one API key).*
+4. Save the file and restart Claude Desktop.
+
+### Cursor
+1. Open Cursor and go to **Settings**.
+2. Search for **MCP** or go to the **Features** -> **MCP** section.
+3. Click **+ Add new MCP server**.
+4. Set the Type to **command**.
+5. Set the Name to `tome`.
+6. Set the Command to: `/absolute/path/to/Tome/venv/bin/python /absolute/path/to/Tome/server.py`
+7. Click Save. (Make sure you have your API keys set in a `.env` file in the Tome project root).
+
+### Roo Code / Cline
+1. Open the Roo Code settings panel.
+2. Go to the **MCP Servers** tab.
+3. Edit the `mcp_settings.json` file with the same configuration block shown above for Claude Desktop.
 
 ## The Pipeline
 
@@ -27,7 +70,7 @@ Adventure PDF → Extract Entities → Enrich with References → Obsidian Vault
 ```
 
 ### Step 1: Extract Entities (`extract_entities_llm`)
-Send raw adventure text to an LLM (Gemini or Claude). Returns structured JSON with chapters containing NPCs, Locations, Encounters, Events, Items, and Monsters.
+Send raw adventure text to an LLM (Gemini, Claude, or OpenAI). Returns structured JSON with chapters containing NPCs, Locations, Encounters, Events, Items, and Monsters.
 
 ### Step 2: Enrich with References (`enrich_with_references`)
 Walks through extracted entities and cross-references them against local reference material (e.g. the D&D 5.2e SRD). Injects statblocks and rules text directly into the data. *Optional — works with any system's reference docs.*

@@ -57,9 +57,9 @@ def extract_pdf_text(pdf_path: str, start_page: int, end_page: int) -> str:
 @mcp.tool()
 def extract_entities_with_llm(text: str, provider: str = "gemini") -> dict:
     """
-    Uses an LLM (Gemini or Claude) to extract structured TTRPG entities from text.
+    Uses an LLM (Gemini, Claude, or OpenAI) to extract structured TTRPG entities from text.
     Returns a dict with chapters containing npcs, locations, encounters, events, items, monsters.
-    Requires GEMINI_API_KEY or ANTHROPIC_API_KEY environment variables.
+    Requires GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY environment variables.
     """
     return extract_entities_llm(text, provider)
 

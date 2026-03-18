@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Core Rule: No Hallucination
 
-**Do not invent game rules, stats, NPC motives, spells, or any other TTRPG content.** All output must be strictly derived from provided source material. If information is not present in the source, say so.
+**Do not invent game rules, stats, NPC motives, spells, or any other TTRPG content.** All output must be strictly derived from provided source material. If information is not present in the source, say so. Our fundamental purpose is to *parse human written content*, not generate AI content.
 
 ## Commands
 
@@ -29,6 +29,7 @@ venv/bin/python test_reference.py
 Environment variables (`.env` file at project root):
 - `GEMINI_API_KEY` — required for `extract_entities_llm` with `provider="gemini"` (default)
 - `ANTHROPIC_API_KEY` — required for `extract_entities_llm` with `provider="claude"`
+- `OPENAI_API_KEY` — required for `extract_entities_llm` with `provider="openai"`
 
 ## Architecture
 
@@ -43,7 +44,7 @@ The MCP server (`server.py`) wraps tool modules and exposes them via `FastMCP("t
 
 ### The 3-Step Pipeline
 
-1. **`extract_entities_llm(text, provider)`** — LLM extracts `{"chapters": [...]}` JSON with NPCs, locations, encounters, events, items, monsters.
+1. **`extract_entities_llm(text, provider)`** — LLM (Gemini, Claude, or OpenAI) extracts `{"chapters": [...]}` JSON with NPCs, locations, encounters, events, items, monsters.
 2. **`enrich_with_references(entities, reference_dirs)`** — Cross-references entities against local reference material (statblocks, rules text).
 3. **`generate_obsidian(entities, output_dir)`** — Writes enriched data as Obsidian vault with YAML frontmatter, `[[wikilinks]]`, and `_Home.md`.
 
