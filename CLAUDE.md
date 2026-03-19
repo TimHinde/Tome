@@ -19,7 +19,7 @@ All commands use the project virtualenv at `venv/`:
 venv/bin/python server.py
 
 # Run the full test suite
-venv/bin/python -m unittest test_obsidian.py -v
+venv/bin/python -m unittest test_obsidian.py test_merge.py -v
 
 # Run individual test scripts
 venv/bin/python test_pdf.py
@@ -37,16 +37,21 @@ The MCP server (`server.py`) wraps tool modules and exposes them via `FastMCP("t
 
 | Module | Purpose |
 |---|---|
-| `pdf_tools.py` | PDF → text via PyMuPDF. TOC analysis + page-range extraction. |
+| `pdf_tools.py` | PDF → text via PyMuPDF. TOC analysis, page-range extraction, chunk suggestion. |
 | `reference_tools.py` | System-agnostic reference search. Reads markdown files from any reference directory. Ships with D&D 5.2e SRD as default. |
-| `obsidian_tools.py` | LLM entity extraction + reference enrichment + Obsidian vault generation with `_Home.md` index. |
+| `obsidian_tools.py` | LLM entity extraction, entity merging, reference enrichment, Obsidian vault generation with `_Home.md` index. |
 | `server.py` | FastMCP entrypoint. Registers all tools and runs stdio transport. |
 
-### The 3-Step Pipeline
+### Composable Tool Workflow
 
-1. **`extract_entities_llm(text, provider)`** — LLM (Gemini, Claude, or OpenAI) extracts `{"chapters": [...]}` JSON with NPCs, locations, encounters, events, items, monsters.
-2. **`enrich_with_references(entities, reference_dirs)`** — Cross-references entities against local reference material (statblocks, rules text).
-3. **`generate_obsidian(entities, output_dir)`** — Writes enriched data as Obsidian vault with YAML frontmatter, `[[wikilinks]]`, and `_Home.md`.
+See `WORKFLOWS.md` for the full 7-step orchestration guide. The core tools:
+
+1. **`analyze_pdf`** / **`suggest_pdf_chunks`** — Discover document structure and plan extraction chunks.
+2. **`extract_pdf_text`** — Pull raw text for a page range.
+3. **`extract_entities_with_llm`** — LLM extracts both chapter-scoped and global reference entities.
+4. **`merge_entity_dicts`** — Combine + deduplicate results from multiple extraction chunks.
+5. **`enrich_entities`** — Cross-reference against local reference material (statblocks, rules text).
+6. **`generate_obsidian_markdown(entities, output_dir, mode)`** — Write Obsidian vault. Modes: `"adventure"`, `"campaign_setting"`, `"auto"` (default, detects from data).
 
 ### Data Shape
 
@@ -61,7 +66,15 @@ The MCP server (`server.py`) wraps tool modules and exposes them via `FastMCP("t
     "events": [{"name":"", "read_aloud":"", "description":"", "mechanics":"", "next_steps":"", "npcs_present":[]}],
     "items": [{"name":"", "rarity":"", "description":"", "mechanics":""}],
     "monsters": [{"name":"", "statblock":""}]
-  }]
+  }],
+  "races": [{"name":"", "description":"", "subraces":[], "asi":{}, "speed":30, "size":"Medium", "traits":[], "languages":[]}],
+  "classes": [{"name":"", "base_class":"", "type":"class|subclass", "description":"", "features":[]}],
+  "spells": [{"name":"", "level":0, "school":"", "casting_time":"", "range":"", "components":"", "duration":"", "classes":[], "description":""}],
+  "deities": [{"name":"", "alignment":"", "domains":[], "symbol":"", "description":""}],
+  "backgrounds": [{"name":"", "description":"", "skill_proficiencies":[], "tool_proficiencies":[]}],
+  "feats": [{"name":"", "prerequisite":"", "description":"", "benefits":[]}],
+  "factions": [{"name":"", "type":"", "description":"", "goals":"", "members":[], "base_of_operations":""}],
+  "lore_entries": [{"name":"", "category":"", "description":"", "related_entities":[]}]
 }
 ```
 
