@@ -14,7 +14,8 @@ from obsidian_tools import (
     extract_entities_llm,
     extract_entities_heuristic,
     enrich_with_references,
-    generate_obsidian
+    generate_obsidian,
+    convert_5e_to_nimble
 )
 
 # Initialize FastMCP Server
@@ -28,6 +29,21 @@ def query_references(query: str, reference_dir: str = None) -> str:
     Returns snippets from the reference material where the query is found.
     """
     return query_reference(query, reference_dir)
+
+@mcp.tool()
+def convert_5e_monster_to_nimble(statblock: str) -> str:
+    """
+    Converts a D&D 5e monster statblock into Nimble RPG 2e format automatically using heuristic extraction.
+    """
+    return convert_5e_to_nimble(statblock)
+
+@mcp.tool()
+def convert_5e_bestiary_to_nimble_batch(input_dir: str, output_dir: str, tag: str = "Monster", provider: str = "claude", batch_size: int = 20) -> dict:
+    """
+    Bulk converts a directory of 5e statblocks to Nimble 2e formatted Obsidian markdown.
+    """
+    from nimble_tools import convert_5e_bestiary_to_nimble
+    return convert_5e_bestiary_to_nimble(input_dir, output_dir, tag, provider, batch_size)
 
 @mcp.tool()
 def list_references(reference_dir: str = None) -> str:

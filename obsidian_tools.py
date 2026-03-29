@@ -114,6 +114,35 @@ def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
     except json.JSONDecodeError as e:
         return {"error": f"Failed to parse JSON: {e}", "raw": content}
 
+def convert_5e_to_nimble(statblock: str) -> str:
+    """
+    Converts a D&D 5e monster statblock to Nimble RPG 2e format.
+    Uses heuristic extraction to wrap it in an entity, then converts via LLM,
+    and returns the fully formatted Obsidian markdown string.
+    """
+    from nimble_tools import convert_entities_to_nimble
+    
+    # Extract name using first line if possible
+    lines = [line.strip() for line in statblock.strip().splitlines() if line.strip()]
+    name = lines[0] if lines else "Unknown Monster"
+    
+    entities = {
+        "chapters": [{
+            "name": "Single Conversion",
+            "monsters": [{"name": name, "statblock": statblock}]
+        }]
+    }
+    
+    # Try converting via the LLM logic (defaults to claude)
+    try:
+        nimble_entities = convert_entities_to_nimble(entities)
+        monster = nimble_entities["chapters"][0]["monsters"][0]
+        # Force the system flag so the renderer treats it as Nimble
+        monster["system"] = "Nimble 2e"
+        return _render_nimble_monster(monster, "")
+    except Exception as e:
+        return f"Error converting statblock: {e}\n\nOriginal Input:\n{statblock}"
+
 def extract_entities_heuristic(text: str) -> dict:
     """
     Fallback tool that uses heuristics (regex) to extract basic entities.
@@ -214,6 +243,73 @@ def _yaml_escape(value: str) -> str:
         return f'"{escaped}"'
     return value
 
+
+def _render_nimble_monster(monster: dict, chap_name: str = "") -> str:
+    name = monster.get("name", "Unknown Monster")
+    tag = monster.get("tag_override", "Monster")
+    role = monster.get("role", "Unknown Role")
+    
+    content = f"---\n"
+    content += f"tags: [{tag}, Nimble, {role}]\n"
+    content += f"source_system: \"D&D 5e (converted to Nimble 2e)\"\n"
+    content += f"cr_original: {_yaml_escape(str(monster.get('cr_original', '')))}\n"
+    if chap_name:
+        content += f"chapter: {_yaml_escape(chap_name)}\n"
+    content += f"---\n\n"
+    content += f"# {name}\n\n"
+    
+    content += f"> [!info]- Nimble Stat Block\n"
+    content += f"> **Level:** {monster.get('level', '?')} | **Role:** {role} | **HP:** {monster.get('hp', '?')} | **Armor:** {monster.get('armor', '?')} | **Speed:** {monster.get('speed', '?')}\n"
+    
+    saves = monster.get("saves", "—")
+    if isinstance(saves, list): saves = ", ".join(saves)
+    content += f"> **Saves:** {saves}\n"
+    
+    damage_traits = monster.get("damage_traits", "—")
+    if damage_traits:
+        content += f"> **Damage Traits:** {damage_traits}\n"
+        
+    cond_imm = monster.get("condition_immunities", "—")
+    if cond_imm:
+        content += f"> **Condition Immunities:** {cond_imm}\n"
+    
+    senses = monster.get("senses", "—")
+    if senses:
+        content += f"> **Senses:** {senses}\n"
+        
+    content += ">\n"
+    
+    traits = monster.get("traits", [])
+    if traits:
+        content += "> **Traits**\n"
+        if isinstance(traits, list):
+            for t in traits:
+                if isinstance(t, dict):
+                    content += f"> {t.get('name', '')}. {t.get('description', '')}\n"
+                else:
+                    content += f"> {t}\n"
+        else:
+            content += f"> {traits}\n"
+        content += ">\n"
+        
+    actions = monster.get("actions", [])
+    if actions:
+        content += "> **Actions**\n"
+        if isinstance(actions, list):
+            for a in actions:
+                if isinstance(a, dict):
+                    content += f"> {a.get('name', '')}. {a.get('description', '')}\n"
+                else:
+                    content += f"> {a}\n"
+        else:
+            content += f"> {actions}\n"
+    
+    notes = monster.get("conversion_notes", "No mechanics flagged for review.")
+    content += f"\n> [!warning]- Conversion Notes\n"
+    for line in notes.splitlines():
+        content += f"> - {line}\n"
+        
+    return content
 
 def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
     """
@@ -504,11 +600,15 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
                 filepath = cat_dir / filename
                 child_links["Monsters"].append(f"[[{name}]]")
                 
-                content = f"---\ntags: [Monster, Bestiary]\n"
-                content += f"chapter: {_yaml_escape(chap_name)}\n"
-                content += f"---\n\n"
-                content += f"# {name}\n\n"
-                content += f"{monster.get('statblock', '')}\n\n"
+                system = monster.get("system", "")
+                if "Nimble 2e" in system:
+                    content = _render_nimble_monster(monster, chap_name)
+                else:
+                    content = f"---\ntags: [Monster, Bestiary]\n"
+                    content += f"chapter: {_yaml_escape(chap_name)}\n"
+                    content += f"---\n\n"
+                    content += f"# {name}\n\n"
+                    content += f"{monster.get('statblock', '')}\n\n"
                 
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(content)
