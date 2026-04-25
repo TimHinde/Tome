@@ -114,34 +114,64 @@ def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
     except json.JSONDecodeError as e:
         return {"error": f"Failed to parse JSON: {e}", "raw": content}
 
-def convert_5e_to_nimble(statblock: str) -> str:
+def convert_5e_to_nimble(statblock: str) -> dict:
     """
-    Converts a D&D 5e monster statblock to Nimble RPG 2e format.
-    Uses heuristic extraction to wrap it in an entity, then converts via LLM,
-    and returns the fully formatted Obsidian markdown string.
+    Returns context for the calling LLM to convert a D&D 5e monster statblock to Nimble RPG 2e.
+    Loads Nimble 2e reference material and describes the required output format.
+    No LLM call is made — the calling LLM performs the conversion.
     """
-    from nimble_tools import convert_entities_to_nimble
-    
-    # Extract name using first line if possible
-    lines = [line.strip() for line in statblock.strip().splitlines() if line.strip()]
-    name = lines[0] if lines else "Unknown Monster"
-    
-    entities = {
-        "chapters": [{
-            "name": "Single Conversion",
-            "monsters": [{"name": name, "statblock": statblock}]
-        }]
+    nimble_ref_dir = Path(__file__).parent / "references" / "nimble"
+    docs = []
+    for filepath in sorted(nimble_ref_dir.glob("*.md")):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                docs.append(f"--- {filepath.name} ---\n{f.read()}\n")
+        except Exception:
+            pass
+    nimble_reference = "\n".join(docs)
+
+    output_format = """Obsidian markdown with this exact structure:
+
+---
+tags: [Monster, Nimble, <role>]
+source_system: "D&D 5e (converted to Nimble 2e)"
+cr_original: <original CR>
+---
+
+# <Monster Name>
+
+> [!info]- Nimble Stat Block
+> **Level:** <level> | **Role:** <role> | **HP:** <hp> | **Armor:** <armor> | **Speed:** <speed>
+> **Saves:** <saves>
+> **Damage Traits:** <damage_traits>
+> **Condition Immunities:** <condition_immunities>
+> **Senses:** <senses>
+>
+> **Traits**
+> <Trait Name>. <description>
+>
+> **Actions**
+> <Action Name>. <description>
+
+> [!warning]- Conversion Notes
+> - <note line>
+
+Conversion rules:
+- level: max(1, CR)
+- armor: Unarmored (AC <=13), Medium Armor (AC 14-17), Heavy Armor (AC 18+)
+- role: pick from Melee / Ranged / Controller / Support / AoE / Summoner / Striker / Ambusher / Defender (can combine two)
+- saves: relevant saving throw bonuses
+- damage_traits: resistances, immunities, vulnerabilities in Nimble format
+- actions: converted from 5e attacks — add "hits unless roll of 1, crits on max die"
+- traits: passive abilities; legendary resistances become Boss traits
+- conversion_notes: flag anything requiring GM review"""
+
+    return {
+        "statblock": statblock,
+        "nimble_reference": nimble_reference,
+        "output_format": output_format,
+        "instructions": "Convert the statblock to Nimble 2e using the reference material. Output Obsidian markdown matching the output_format.",
     }
-    
-    # Try converting via the LLM logic (defaults to claude)
-    try:
-        nimble_entities = convert_entities_to_nimble(entities)
-        monster = nimble_entities["chapters"][0]["monsters"][0]
-        # Force the system flag so the renderer treats it as Nimble
-        monster["system"] = "Nimble 2e"
-        return _render_nimble_monster(monster, "")
-    except Exception as e:
-        return f"Error converting statblock: {e}\n\nOriginal Input:\n{statblock}"
 
 def extract_entities_heuristic(text: str) -> dict:
     """

@@ -31,19 +31,23 @@ def query_references(query: str, reference_dir: str = None) -> str:
     return query_reference(query, reference_dir)
 
 @mcp.tool()
-def convert_5e_monster_to_nimble(statblock: str) -> str:
+def convert_5e_monster_to_nimble(statblock: str) -> dict:
     """
-    Converts a D&D 5e monster statblock into Nimble RPG 2e format automatically using heuristic extraction.
+    Prepares context for converting a D&D 5e monster statblock to Nimble RPG 2e format.
+    Returns the statblock, Nimble 2e reference material, output format description, and conversion
+    instructions. The calling LLM performs the actual conversion and writes the output file.
     """
     return convert_5e_to_nimble(statblock)
 
 @mcp.tool()
-def convert_5e_bestiary_to_nimble_batch(input_dir: str, output_dir: str, tag: str = "Monster", provider: str = "claude", batch_size: int = 20) -> dict:
+def convert_5e_bestiary_to_nimble_batch(input_dir: str, output_dir: str) -> dict:
     """
-    Bulk converts a directory of 5e statblocks to Nimble 2e formatted Obsidian markdown.
+    Prepares context for bulk-converting a directory of D&D 5e statblock markdown files to Nimble 2e.
+    Returns all statblock contents, Nimble 2e reference material, and conversion instructions.
+    The calling LLM performs the conversion and writes one Obsidian markdown file per monster to output_dir.
     """
     from nimble_tools import convert_5e_bestiary_to_nimble
-    return convert_5e_bestiary_to_nimble(input_dir, output_dir, tag, provider, batch_size)
+    return convert_5e_bestiary_to_nimble(input_dir, output_dir)
 
 @mcp.tool()
 def list_references(reference_dir: str = None) -> str:
