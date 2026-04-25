@@ -4,25 +4,106 @@ import json
 from pathlib import Path
 from reference_tools import query_reference
 
+# All entity type keys that can appear at the top level (global) or inside chapters
+GLOBAL_ENTITY_KEYS = ["races", "classes", "spells", "deities", "backgrounds", "feats", "factions", "lore_entries"]
+CHAPTER_ENTITY_KEYS = ["npcs", "locations", "encounters", "events", "items", "monsters"]
+
+
+def merge_entities(entity_dicts: list) -> dict:
+    """
+    Merge multiple entity extraction results into a single dict.
+    Deduplication: first-write-wins by entity name within each type.
+    Chapters are merged by name; global arrays are combined and deduped.
+    """
+    merged = {"chapters": []}
+    
+    # Initialize global arrays
+    for key in GLOBAL_ENTITY_KEYS:
+        merged[key] = []
+    # Top-level monsters (bestiary)
+    merged["monsters"] = []
+
+    seen_names = {}  # key -> set of names already added
+    for key in GLOBAL_ENTITY_KEYS + ["monsters"]:
+        seen_names[key] = set()
+
+    chapter_map = {}  # chapter name -> merged chapter dict
+
+    for entity_dict in entity_dicts:
+        if not isinstance(entity_dict, dict):
+            continue
+
+        # Merge chapters
+        for chapter in entity_dict.get("chapters", []):
+            if not isinstance(chapter, dict):
+                continue
+            chap_name = chapter.get("name", "Arc: Uncategorized")
+            if chap_name not in chapter_map:
+                chapter_map[chap_name] = {
+                    "name": chap_name,
+                    "overview": chapter.get("overview", chapter.get("description", "")),
+                    "reading_order": chapter.get("reading_order", []),
+                }
+                for key in CHAPTER_ENTITY_KEYS:
+                    chapter_map[chap_name][key] = []
+
+            target = chapter_map[chap_name]
+            # Merge chapter-scoped entities by name
+            for key in CHAPTER_ENTITY_KEYS:
+                existing_names = {e.get("name", "").lower() for e in target[key] if isinstance(e, dict)}
+                for entity in chapter.get(key, []):
+                    if isinstance(entity, dict):
+                        ename = entity.get("name", "").lower()
+                        if ename and ename not in existing_names:
+                            target[key].append(entity)
+                            existing_names.add(ename)
+
+        # Merge global entity arrays
+        for key in GLOBAL_ENTITY_KEYS + ["monsters"]:
+            for entity in entity_dict.get(key, []):
+                if isinstance(entity, dict):
+                    ename = entity.get("name", "").lower()
+                    if ename and ename not in seen_names[key]:
+                        merged[key].append(entity)
+                        seen_names[key].add(ename)
+
+    merged["chapters"] = list(chapter_map.values())
+    
+    # Remove empty global arrays to keep output clean
+    for key in GLOBAL_ENTITY_KEYS + ["monsters"]:
+        if not merged[key]:
+            del merged[key]
+
+    return merged
+
+
+
 def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
     """
     Uses an LLM to extract entities from the raw adventure text.
     Returns a dictionary of structured data.
     """
     prompt = f"""
-    You are an AI assistant helping a Game Master. 
-    Review the following TTRPG adventure text and extract the key entities, organizing them hierarchically by Chapter or Arc.
+    You are an AI assistant helping a Game Master.
+    Review the following TTRPG text and extract ALL key entities. The text may be from an adventure module, a campaign setting, a supplement, or a combination.
+
+    Return a JSON object with TWO kinds of content:
+
+    1. CHAPTER-SCOPED content (adventure/narrative) — goes inside a "chapters" array.
+    2. GLOBAL REFERENCE content (player options, bestiary, world lore) — goes in TOP-LEVEL arrays, NOT inside any chapter.
+
+    === CHAPTER-SCOPED ENTITIES (inside "chapters") ===
 
     Use these STRICT definitions — every scene goes in exactly ONE category:
-    - ENCOUNTER: Any scene where the party faces an active challenge requiring dice rolls — combat, skill challenge, chase, puzzle, trap, or social conflict with mechanics. Caravan road encounters, boss fights, and multi-stage challenges are all encounters.
-    - EVENT: A pure narrative beat with no active dice-roll challenge — story transitions, chapter setup/intro, lore reveals, consequence text (what happens after), or GM housekeeping notes.
+    - ENCOUNTER: Any scene where the party faces an active challenge requiring dice rolls — combat, skill challenge, chase, puzzle, trap, or social conflict with mechanics.
+    - EVENT: A pure narrative beat with no active dice-roll challenge — story transitions, chapter setup/intro, lore reveals, consequence text, or GM housekeeping notes.
     - LOCATION: A physical place the party can explore, distinct from the encounter that happens there. Only create a location if it has descriptive value beyond being "the room where encounter X happens."
     - Do NOT put the same scene in both encounters and events. If something has mechanics, it is an encounter only.
 
-    Return ONLY a valid JSON object with a single "chapters" array. Each chapter should contain:
+    Each chapter should contain:
     - name: "Chapter 1: The Beginning"
     - overview: "A detailed narrative summary of the chapter's storyline and events"
-    - reading_order: A flat, ordered list reflecting the sequence a GM would read these documents during play. ONLY include types "location", "encounter", and "event" — do NOT include npc, monster, or item entries. Each entry: {{"name": "...", "type": "event|location|encounter", "note": "One sentence: why the GM reads this now / what it triggers"}}. Optional entries should be labeled "(Optional)" at the start of their note.
+    - reading_order: A flat, ordered list reflecting the sequence a GM would read these documents during play. ONLY include types "location", "encounter", and "event". Each entry: {{"name": "...", "type": "event|location|encounter", "note": "One sentence: why the GM reads this now / what it triggers"}}
     - npcs: [{{"name": "...", "motivation": "...", "secret": "...", "statblock": "...", "location": "..."}}]
     - locations: [{{"name": "...", "description": "...", "encounters": ["..."], "loot": ["..."], "exits": ["..."]}}]
     - encounters: [{{"name": "...", "read_aloud": "Exact text to read aloud to players, or empty string if none", "description": "Full GM-facing context: setup, what is really happening, tactics, branching outcomes", "mechanics": "All DCs, rolls, conditions, turn structure, success/failure consequences", "monsters": ["Monster Name"], "npcs_present": ["NPC Name"]}}]
@@ -30,7 +111,48 @@ def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
     - items: [{{"name": "...", "rarity": "...", "description": "...", "mechanics": "..."}}]
     - monsters: [{{"name": "...", "statblock": "Full text of the stat block if it is explicitly provided in the text"}}]
 
-    If the text doesn't explicitly have chapters, put everything under a single chapter named "Arc: Uncategorized".
+    === GLOBAL REFERENCE ENTITIES (top-level arrays, NOT inside chapters) ===
+
+    These are reference content that exists outside any single chapter. Place them in the appropriate top-level array:
+
+    - RACES: Any playable species/race writeup. Capture ALL traits, ASIs, speeds, subraces. Schema: {{"name": "...", "description": "Full flavour/lore text", "subraces": ["..."], "asi": {{"STR": 0, "DEX": 0, ...}}, "speed": 30, "size": "Medium", "traits": [{{"name": "...", "description": "..."}}], "languages": ["..."], "source_chapter": "..."}}
+
+    - CLASSES: Class options, archetypes, subclasses. Capture all features by level. Schema: {{"name": "...", "base_class": "Bard", "type": "subclass|class", "description": "...", "features": [{{"name": "...", "level": 3, "description": "..."}}], "source_chapter": "..."}}
+
+    - SPELLS: Spell entries with full mechanics. Schema: {{"name": "...", "level": 0, "school": "Evocation", "casting_time": "1 action", "range": "Self", "components": "V, S", "duration": "Instantaneous", "classes": ["Cleric"], "description": "Full spell text", "higher_levels": "...", "source_chapter": "..."}}
+
+    - DEITIES: Divine beings, gods, patron spirits. NOT NPCs — use this type instead. Schema: {{"name": "...", "title": "...", "alignment": "...", "domains": ["Life"], "symbol": "...", "worshippers": "...", "description": "...", "myths": "...", "appearance": "...", "personality": "...", "source_chapter": "..."}}
+
+    - BACKGROUNDS: PC background options. Schema: {{"name": "...", "description": "...", "skill_proficiencies": ["..."], "tool_proficiencies": ["..."], "languages": 0, "equipment": ["..."], "feature": {{"name": "...", "description": "..."}}, "source_chapter": "..."}}
+
+    - FEATS: Feat writeups. Schema: {{"name": "...", "prerequisite": "...", "description": "...", "benefits": ["..."], "source_chapter": "..."}}
+
+    - FACTIONS: Only if clearly described as an organization. Schema: {{"name": "...", "type": "...", "description": "...", "goals": "...", "members": ["..."], "base_of_operations": "...", "allies": ["..."], "enemies": ["..."], "source_chapter": "..."}}
+
+    - LORE_ENTRIES: World history, creation myths, cosmological exposition that doesn't fit encounters or events. Schema: {{"name": "...", "category": "Cosmology|History|Culture|Geography", "description": "...", "related_entities": ["..."], "source_chapter": "..."}}
+
+    === IMPORTANT RULES ===
+    - Deities are NEVER NPCs. If a being is worshipped, has domains/symbols, it goes in "deities".
+    - Creatures with full stat blocks from a bestiary section go in top-level "monsters" array (same schema as chapter monsters), not inside a chapter.
+    - If the text has no chapter/adventure structure, use an empty "chapters" array.
+    - If the text has no reference content, omit or leave empty the global arrays.
+    - If the text doesn't explicitly have chapters, put narrative content under a single chapter named "Arc: Uncategorized".
+
+    Return ONLY valid JSON with this structure:
+    {{
+      "chapters": [...],
+      "races": [...],
+      "classes": [...],
+      "spells": [...],
+      "deities": [...],
+      "backgrounds": [...],
+      "feats": [...],
+      "factions": [...],
+      "lore_entries": [...],
+      "monsters": [...]
+    }}
+
+    Omit any top-level array that has no entries. Always include "chapters" even if empty.
     Return ONLY valid JSON. Do not include markdown formatting or other text around the JSON.
     Text to analyze:
     {text}
@@ -188,7 +310,15 @@ def extract_entities_heuristic(text: str) -> dict:
             "events": [],
             "items": [],
             "monsters": []
-        }]
+        }],
+        "races": [],
+        "classes": [],
+        "spells": [],
+        "deities": [],
+        "backgrounds": [],
+        "feats": [],
+        "factions": [],
+        "lore_entries": []
     }
     chapter = entities["chapters"][0]
     
@@ -213,6 +343,39 @@ def extract_entities_heuristic(text: str) -> dict:
             name_part = line.split(":", 1)
             name = name_part[1].strip() if len(name_part) > 1 else line.strip()
             chapter["items"].append({"name": name, "rarity": "", "description": "", "mechanics": ""})
+        # Global entity types
+        elif "race:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["races"].append({"name": name, "description": "", "subraces": [], "asi": {}, "speed": 30, "size": "Medium", "traits": [], "languages": [], "source_chapter": ""})
+        elif "spell:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["spells"].append({"name": name, "level": 0, "school": "", "casting_time": "", "range": "", "components": "", "duration": "", "classes": [], "description": "", "source_chapter": ""})
+        elif "deity:" in lower_line or "god:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["deities"].append({"name": name, "title": "", "alignment": "", "domains": [], "symbol": "", "worshippers": "", "description": "", "source_chapter": ""})
+        elif "class:" in lower_line or "subclass:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["classes"].append({"name": name, "base_class": "", "type": "class", "description": "", "features": [], "source_chapter": ""})
+        elif "background:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["backgrounds"].append({"name": name, "description": "", "skill_proficiencies": [], "tool_proficiencies": [], "source_chapter": ""})
+        elif "feat:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["feats"].append({"name": name, "prerequisite": "", "description": "", "benefits": [], "source_chapter": ""})
+        elif "faction:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["factions"].append({"name": name, "type": "", "description": "", "goals": "", "members": [], "source_chapter": ""})
+        elif "lore:" in lower_line:
+            name_part = line.split(":", 1)
+            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
+            entities["lore_entries"].append({"name": name, "category": "", "description": "", "related_entities": [], "source_chapter": ""})
             
     return entities
 
@@ -278,7 +441,7 @@ def _render_nimble_monster(monster: dict, chap_name: str = "") -> str:
     name = monster.get("name", "Unknown Monster")
     tag = monster.get("tag_override", "Monster")
     role = monster.get("role", "Unknown Role")
-    
+
     content = f"---\n"
     content += f"tags: [{tag}, Nimble, {role}]\n"
     content += f"source_system: \"D&D 5e (converted to Nimble 2e)\"\n"
@@ -287,28 +450,28 @@ def _render_nimble_monster(monster: dict, chap_name: str = "") -> str:
         content += f"chapter: {_yaml_escape(chap_name)}\n"
     content += f"---\n\n"
     content += f"# {name}\n\n"
-    
+
     content += f"> [!info]- Nimble Stat Block\n"
     content += f"> **Level:** {monster.get('level', '?')} | **Role:** {role} | **HP:** {monster.get('hp', '?')} | **Armor:** {monster.get('armor', '?')} | **Speed:** {monster.get('speed', '?')}\n"
-    
+
     saves = monster.get("saves", "—")
     if isinstance(saves, list): saves = ", ".join(saves)
     content += f"> **Saves:** {saves}\n"
-    
+
     damage_traits = monster.get("damage_traits", "—")
     if damage_traits:
         content += f"> **Damage Traits:** {damage_traits}\n"
-        
+
     cond_imm = monster.get("condition_immunities", "—")
     if cond_imm:
         content += f"> **Condition Immunities:** {cond_imm}\n"
-    
+
     senses = monster.get("senses", "—")
     if senses:
         content += f"> **Senses:** {senses}\n"
-        
+
     content += ">\n"
-    
+
     traits = monster.get("traits", [])
     if traits:
         content += "> **Traits**\n"
@@ -321,7 +484,7 @@ def _render_nimble_monster(monster: dict, chap_name: str = "") -> str:
         else:
             content += f"> {traits}\n"
         content += ">\n"
-        
+
     actions = monster.get("actions", [])
     if actions:
         content += "> **Actions**\n"
@@ -333,18 +496,24 @@ def _render_nimble_monster(monster: dict, chap_name: str = "") -> str:
                     content += f"> {a}\n"
         else:
             content += f"> {actions}\n"
-    
+
     notes = monster.get("conversion_notes", "No mechanics flagged for review.")
     content += f"\n> [!warning]- Conversion Notes\n"
     for line in notes.splitlines():
         content += f"> - {line}\n"
-        
+
     return content
 
-def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
+def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> list[str]:
     """
     Generates Obsidian Markdown files from nested chapter entities.
     Includes enriched YAML frontmatter for Dataview and a _Home.md index.
+    
+    Modes:
+    - "adventure": Chapter-scoped subfolders only (original behavior)
+    - "campaign_setting": Global folders for reference content + chapter folders for adventure content
+    - "auto" (default): Detects from entity data — campaign_setting if global arrays present, else adventure
+    
     Returns a list of generated file paths.
     """
     out_path = Path(output_dir)
@@ -353,7 +522,15 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
     generated_files = []
     
     if "chapters" not in entities:
-        return []
+        entities["chapters"] = []
+
+    # Resolve auto mode
+    GLOBAL_ENTITY_TYPES = ["races", "classes", "spells", "deities", "backgrounds", "feats", "factions", "lore_entries"]
+    if mode == "auto":
+        has_global = any(len(entities.get(t, [])) > 0 for t in GLOBAL_ENTITY_TYPES)
+        # Also check for top-level monsters (bestiary)
+        has_toplevel_monsters = len(entities.get("monsters", [])) > 0 and len(entities.get("chapters", [])) == 0
+        mode = "campaign_setting" if (has_global or has_toplevel_monsters) else "adventure"
 
     def sanitize_filename(name: str) -> str:
         return re.sub(r'[^a-zA-Z0-9_\- ]', '', name).strip()
@@ -391,25 +568,26 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
                 filepath = cat_dir / filename
                 child_links["NPCs"].append(f"[[{name}]]")
                 
-                content = f"---\ntags: [NPC]\n"
-                content += f"chapter: {_yaml_escape(chap_name)}\n"
-                content += f"location: {_yaml_escape(npc.get('location', ''))}\n"
-                content += f"statblock: {_yaml_escape(npc.get('statblock', ''))}\n"
-                content += f"motivation: {_yaml_escape(npc.get('motivation', ''))}\n"
-                content += f"---\n\n"
-                content += f"# {name}\n\n"
-                content += f"**Motivation:** {npc.get('motivation', '')}\n\n"
-                content += f"**Secret:** {npc.get('secret', '')}\n\n"
-                
-                if "srd_reference" in npc:
-                    content += "## Reference Statblock\n"
-                    content += f"> [!info]- Statblock\n"
-                    for line in npc['srd_reference'].splitlines():
-                        content += f"> {line}\n"
-                        
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                generated_files.append(str(filepath))
+                if not filepath.exists():
+                    content = f"---\ntags: [NPC]\n"
+                    content += f"chapter: {_yaml_escape(chap_name)}\n"
+                    content += f"location: {_yaml_escape(npc.get('location', ''))}\n"
+                    content += f"statblock: {_yaml_escape(npc.get('statblock', ''))}\n"
+                    content += f"motivation: {_yaml_escape(npc.get('motivation', ''))}\n"
+                    content += f"---\n\n"
+                    content += f"# {name}\n\n"
+                    content += f"**Motivation:** {npc.get('motivation', '')}\n\n"
+                    content += f"**Secret:** {npc.get('secret', '')}\n\n"
+                    
+                    if "srd_reference" in npc:
+                        content += "## Reference Statblock\n"
+                        content += f"> [!info]- Statblock\n"
+                        for line in npc['srd_reference'].splitlines():
+                            content += f"> {line}\n"
+                            
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    generated_files.append(str(filepath))
 
         # Generate Locations
         if "locations" in chapter and isinstance(chapter["locations"], list):
@@ -422,36 +600,37 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
                 filepath = cat_dir / filename
                 child_links["Locations"].append(f"[[{name}]]")
                 
-                content = f"---\ntags: [Location]\n"
-                content += f"chapter: {_yaml_escape(chap_name)}\n"
-                content += f"---\n\n"
-                content += f"# {name}\n\n"
-                content += f"> {loc.get('description', '')}\n\n"
-                
-                encounters = loc.get("encounters", [])
-                if encounters:
-                    content += "## Encounters\n"
-                    for enc in encounters:
-                        link_name = enc['name'] if isinstance(enc, dict) and 'name' in enc else str(enc)
-                        content += f"- [[{link_name}]]\n"
-                
-                loot = loc.get("loot", [])
-                if loot:
-                    content += "## Loot\n"
-                    for l in loot:
-                        link_name = l['name'] if isinstance(l, dict) and 'name' in l else str(l)
-                        content += f"- [[{link_name}]]\n"
-                        
-                exits = loc.get("exits", [])
-                if exits:
-                    content += "## Exits\n"
-                    for ex in exits:
-                        link_name = ex['name'] if isinstance(ex, dict) and 'name' in ex else str(ex)
-                        content += f"- [[{link_name}]]\n"
-                
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                generated_files.append(str(filepath))
+                if not filepath.exists():
+                    content = f"---\ntags: [Location]\n"
+                    content += f"chapter: {_yaml_escape(chap_name)}\n"
+                    content += f"---\n\n"
+                    content += f"# {name}\n\n"
+                    content += f"> {loc.get('description', '')}\n\n"
+                    
+                    encounters = loc.get("encounters", [])
+                    if encounters:
+                        content += "## Encounters\n"
+                        for enc in encounters:
+                            link_name = enc['name'] if isinstance(enc, dict) and 'name' in enc else str(enc)
+                            content += f"- [[{link_name}]]\n"
+                    
+                    loot = loc.get("loot", [])
+                    if loot:
+                        content += "## Loot\n"
+                        for l in loot:
+                            link_name = l['name'] if isinstance(l, dict) and 'name' in l else str(l)
+                            content += f"- [[{link_name}]]\n"
+                            
+                    exits = loc.get("exits", [])
+                    if exits:
+                        content += "## Exits\n"
+                        for ex in exits:
+                            link_name = ex['name'] if isinstance(ex, dict) and 'name' in ex else str(ex)
+                            content += f"- [[{link_name}]]\n"
+                    
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    generated_files.append(str(filepath))
 
         # Generate Encounters
         if "encounters" in chapter and isinstance(chapter["encounters"], list):
@@ -535,9 +714,10 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
                         content += f"- [[{npc_name}]]\n"
                     content += "\n"
 
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                generated_files.append(str(filepath))
+                if not filepath.exists():
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    generated_files.append(str(filepath))
 
         # Generate Events (skip any whose name duplicates an encounter)
         if "events" in chapter and isinstance(chapter["events"], list):
@@ -586,9 +766,10 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
                         content += f"- [[{npc_name}]]\n"
                     content += "\n"
 
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                generated_files.append(str(filepath))
+                if not filepath.exists():
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    generated_files.append(str(filepath))
 
         # Generate Items
         if "items" in chapter and isinstance(chapter["items"], list):
@@ -615,9 +796,10 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
                     for line in item['srd_reference'].splitlines():
                         content += f"> {line}\n"
                         
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                generated_files.append(str(filepath))
+                if not filepath.exists():
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    generated_files.append(str(filepath))
 
         # Generate Monsters
         if "monsters" in chapter and isinstance(chapter["monsters"], list):
@@ -640,9 +822,10 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
                     content += f"# {name}\n\n"
                     content += f"{monster.get('statblock', '')}\n\n"
                 
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
-                generated_files.append(str(filepath))
+                if not filepath.exists():
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    generated_files.append(str(filepath))
 
         # Complete Chapter File — Session Flow first, then compact index
         flow_entries = [
@@ -684,20 +867,284 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
             "monsters": len([l for l in child_links["Monsters"] if l]),
         })
 
+    # === GLOBAL ENTITY WRITERS (campaign_setting mode) ===
+    if mode == "campaign_setting":
+        # Races
+        for race in entities.get("races", []):
+            if not isinstance(race, dict) or not race.get("name", "").strip(): continue
+            name = race["name"]
+            cat_dir = out_path / "Races"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                asi = race.get("asi", {})
+                asi_str = ", ".join(f"{k} +{v}" for k, v in asi.items() if v) if isinstance(asi, dict) else str(asi)
+                content = f"---\ntags: [Race]\nsource_chapter: {_yaml_escape(race.get('source_chapter', ''))}\n"
+                content += f"size: {race.get('size', 'Medium')}\nspeed: {race.get('speed', 30)}\n"
+                if isinstance(asi, dict) and asi:
+                    content += "asi:\n"
+                    for stat, val in asi.items():
+                        content += f"  {stat}: {val}\n"
+                subraces = race.get("subraces", [])
+                if subraces:
+                    content += "subraces:\n"
+                    for sr in subraces:
+                        content += f"  - {_yaml_escape(str(sr))}\n"
+                content += f"---\n\n# {name}\n\n"
+                content += f"> [!info] At a Glance\n> **Size:** {race.get('size', 'Medium')} | **Speed:** {race.get('speed', 30)} ft. | **ASI:** {asi_str}\n\n"
+                content += f"{race.get('description', '')}\n\n"
+                for trait in race.get("traits", []):
+                    if isinstance(trait, dict):
+                        content += f"### {trait.get('name', '')}\n{trait.get('description', '')}\n\n"
+                if subraces:
+                    content += "## Subraces\n"
+                    for sr in subraces:
+                        content += f"### {sr}\n\n"
+                langs = race.get("languages", [])
+                if langs:
+                    content += f"## Languages\n{', '.join(str(l) for l in langs)}\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Classes / Subclasses
+        for cls in entities.get("classes", []):
+            if not isinstance(cls, dict) or not cls.get("name", "").strip(): continue
+            name = cls["name"]
+            cat_dir = out_path / "Classes"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                content = f"---\ntags: [Class]\nsource_chapter: {_yaml_escape(cls.get('source_chapter', ''))}\n"
+                content += f"base_class: {_yaml_escape(cls.get('base_class', ''))}\ntype: {cls.get('type', 'class')}\n"
+                content += f"---\n\n# {name}\n"
+                if cls.get("base_class"):
+                    content += f"*{cls.get('type', 'Subclass').capitalize()} of {cls['base_class']}*\n"
+                content += f"\n{cls.get('description', '')}\n\n"
+                for feat in cls.get("features", []):
+                    if isinstance(feat, dict):
+                        lvl = feat.get("level", "")
+                        lvl_str = f" (Level {lvl})" if lvl else ""
+                        content += f"### {feat.get('name', '')}{lvl_str}\n{feat.get('description', '')}\n\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Spells
+        for spell in entities.get("spells", []):
+            if not isinstance(spell, dict) or not spell.get("name", "").strip(): continue
+            name = spell["name"]
+            cat_dir = out_path / "Spells"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                lvl = spell.get("level", 0)
+                school = spell.get("school", "")
+                lvl_label = "Cantrip" if lvl == 0 else f"{lvl}{'st' if lvl == 1 else 'nd' if lvl == 2 else 'rd' if lvl == 3 else 'th'}-level {school}"
+                classes = spell.get("classes", [])
+                content = f"---\ntags: [Spell]\nsource_chapter: {_yaml_escape(spell.get('source_chapter', ''))}\n"
+                content += f"level: {lvl}\nschool: {_yaml_escape(school)}\n"
+                content += f"casting_time: {_yaml_escape(spell.get('casting_time', ''))}\n"
+                content += f"range: {_yaml_escape(spell.get('range', ''))}\n"
+                content += f"components: {_yaml_escape(spell.get('components', ''))}\n"
+                content += f"duration: {_yaml_escape(spell.get('duration', ''))}\n"
+                if classes:
+                    content += "classes:\n"
+                    for c in classes:
+                        content += f"  - {_yaml_escape(str(c))}\n"
+                content += f"---\n\n# {name}\n*{lvl_label}*\n\n"
+                content += f"**Casting Time:** {spell.get('casting_time', '')}\n"
+                content += f"**Range:** {spell.get('range', '')}\n"
+                content += f"**Components:** {spell.get('components', '')}\n"
+                content += f"**Duration:** {spell.get('duration', '')}\n"
+                if classes:
+                    content += f"**Classes:** {', '.join(str(c) for c in classes)}\n"
+                content += f"\n{spell.get('description', '')}\n\n"
+                higher = spell.get("higher_levels", "")
+                if higher:
+                    content += f"**At Higher Levels.** {higher}\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Deities
+        for deity in entities.get("deities", []):
+            if not isinstance(deity, dict) or not deity.get("name", "").strip(): continue
+            name = deity["name"]
+            title = deity.get("title", "")
+            cat_dir = out_path / "Deities"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                domains = deity.get("domains", [])
+                content = f"---\ntags: [Deity]\nsource_chapter: {_yaml_escape(deity.get('source_chapter', ''))}\n"
+                content += f"alignment: {_yaml_escape(deity.get('alignment', ''))}\n"
+                if domains:
+                    content += "domains:\n"
+                    for d in domains:
+                        content += f"  - {_yaml_escape(str(d))}\n"
+                content += f"symbol: {_yaml_escape(deity.get('symbol', ''))}\n"
+                heading = f"# {name}" + (f" — {title}" if title else "")
+                content += f"---\n\n{heading}\n\n"
+                content += f"> [!info] Divine Profile\n"
+                content += f"> **Alignment:** {deity.get('alignment', '')} | **Domains:** {', '.join(str(d) for d in domains)}\n"
+                content += f"> **Symbol:** {deity.get('symbol', '')}\n"
+                content += f"> **Worshippers:** {deity.get('worshippers', '')}\n\n"
+                content += f"{deity.get('description', '')}\n\n"
+                myths = deity.get("myths", "")
+                if myths:
+                    content += f"## Myths & Stories\n{myths}\n\n"
+                appearance = deity.get("appearance", "")
+                if appearance:
+                    content += f"## Appearance\n{appearance}\n\n"
+                personality = deity.get("personality", "")
+                if personality:
+                    content += f"## Personality\n{personality}\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Backgrounds
+        for bg in entities.get("backgrounds", []):
+            if not isinstance(bg, dict) or not bg.get("name", "").strip(): continue
+            name = bg["name"]
+            cat_dir = out_path / "Backgrounds"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                content = f"---\ntags: [Background]\nsource_chapter: {_yaml_escape(bg.get('source_chapter', ''))}\n"
+                skills = bg.get("skill_proficiencies", [])
+                if skills:
+                    content += "skill_proficiencies:\n"
+                    for s in skills:
+                        content += f"  - {_yaml_escape(str(s))}\n"
+                tools = bg.get("tool_proficiencies", [])
+                if tools:
+                    content += "tool_proficiencies:\n"
+                    for t in tools:
+                        content += f"  - {_yaml_escape(str(t))}\n"
+                content += f"---\n\n# {name}\n\n{bg.get('description', '')}\n\n"
+                feature = bg.get("feature", {})
+                if isinstance(feature, dict) and feature.get("name"):
+                    content += f"## Feature: {feature['name']}\n{feature.get('description', '')}\n\n"
+                if skills:
+                    content += f"**Skill Proficiencies:** {', '.join(str(s) for s in skills)}\n"
+                if tools:
+                    content += f"**Tool Proficiencies:** {', '.join(str(t) for t in tools)}\n"
+                equip = bg.get("equipment", [])
+                if equip:
+                    content += f"\n**Equipment:** {', '.join(str(e) for e in equip)}\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Feats
+        for feat in entities.get("feats", []):
+            if not isinstance(feat, dict) or not feat.get("name", "").strip(): continue
+            name = feat["name"]
+            cat_dir = out_path / "Feats"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                content = f"---\ntags: [Feat]\nsource_chapter: {_yaml_escape(feat.get('source_chapter', ''))}\n"
+                content += f"prerequisite: {_yaml_escape(feat.get('prerequisite', ''))}\n"
+                content += f"---\n\n# {name}\n\n"
+                prereq = feat.get("prerequisite", "")
+                if prereq:
+                    content += f"*Prerequisite: {prereq}*\n\n"
+                content += f"{feat.get('description', '')}\n\n"
+                benefits = feat.get("benefits", [])
+                if benefits:
+                    for b in benefits:
+                        content += f"- {b}\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Factions
+        for faction in entities.get("factions", []):
+            if not isinstance(faction, dict) or not faction.get("name", "").strip(): continue
+            name = faction["name"]
+            cat_dir = out_path / "Factions"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                members = faction.get("members", [])
+                content = f"---\ntags: [Faction]\nsource_chapter: {_yaml_escape(faction.get('source_chapter', ''))}\n"
+                content += f"type: {_yaml_escape(faction.get('type', ''))}\n"
+                content += f"base_of_operations: {_yaml_escape(faction.get('base_of_operations', ''))}\n"
+                content += f"---\n\n# {name}\n\n{faction.get('description', '')}\n\n"
+                content += f"**Goals:** {faction.get('goals', '')}\n\n"
+                if members:
+                    content += "## Members\n"
+                    for m in members:
+                        content += f"- [[{m}]]\n"
+                    content += "\n"
+                allies = faction.get("allies", [])
+                if allies:
+                    content += f"**Allies:** {', '.join(f'[[{a}]]' for a in allies)}\n"
+                enemies = faction.get("enemies", [])
+                if enemies:
+                    content += f"**Enemies:** {', '.join(f'[[{e}]]' for e in enemies)}\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Lore Entries
+        for lore in entities.get("lore_entries", []):
+            if not isinstance(lore, dict) or not lore.get("name", "").strip(): continue
+            name = lore["name"]
+            cat_dir = out_path / "Lore"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                related = lore.get("related_entities", [])
+                content = f"---\ntags: [Lore]\nsource_chapter: {_yaml_escape(lore.get('source_chapter', ''))}\n"
+                content += f"category: {_yaml_escape(lore.get('category', ''))}\n"
+                content += f"---\n\n# {name}\n\n{lore.get('description', '')}\n\n"
+                if related:
+                    content += "## Related\n"
+                    for r in related:
+                        content += f"- [[{r}]]\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
+        # Top-level Bestiary (monsters from global array)
+        for monster in entities.get("monsters", []):
+            if not isinstance(monster, dict) or not monster.get("name", "").strip(): continue
+            name = monster["name"]
+            cat_dir = out_path / "Bestiary"
+            cat_dir.mkdir(exist_ok=True)
+            filepath = cat_dir / f"{sanitize_filename(name)}.md"
+            if not filepath.exists():
+                content = f"---\ntags: [Monster, Bestiary]\n"
+                content += f"source_chapter: {_yaml_escape(monster.get('source_chapter', ''))}\n"
+                content += f"---\n\n# {name}\n\n"
+                statblock = monster.get("statblock", "")
+                if statblock:
+                    content += f"> [!danger]- Stat Block\n"
+                    for line in str(statblock).splitlines():
+                        content += f"> {line}\n"
+                    content += "\n"
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                generated_files.append(str(filepath))
+
     # Generate _Home.md at vault root
     home_path = out_path / "_Home.md"
     home_content = "---\ntags: [Index]\n---\n\n"
     home_content += "# 📖 Vault Index\n\n"
 
-    # Static chapter table
+    # Chapters — Dataview query (idempotent, no duplicate rows)
     home_content += "## Chapters\n\n"
-    home_content += "| Chapter | Encounters | NPCs | Locations | Events | Items | Monsters |\n"
-    home_content += "|---|---|---|---|---|---|---|\n"
-    for stats in chapter_stats:
-        home_content += f"| [[{stats['name']}]] | {stats['encounters']} | {stats['npcs']} | {stats['locations']} | {stats['events']} | {stats['items']} | {stats['monsters']} |\n"
-    home_content += "\n"
+    home_content += "```dataview\n"
+    home_content += "TABLE length(file.inlinks) AS \"Links\"\n"
+    home_content += "FROM #Chapter\n"
+    home_content += "SORT file.name ASC\n"
+    home_content += "```\n\n"
 
-    # Dataview query blocks
+    # Dataview query blocks for chapter-scoped entities
     home_content += "## NPCs\n\n"
     home_content += "```dataview\n"
     home_content += "TABLE location AS \"Location\", motivation AS \"Motivation\", chapter AS \"Chapter\"\n"
@@ -731,7 +1178,65 @@ def generate_obsidian(entities: dict, output_dir: str) -> list[str]:
     home_content += "TABLE chapter AS \"Chapter\"\n"
     home_content += "FROM #Location\n"
     home_content += "SORT chapter ASC, file.name ASC\n"
-    home_content += "```\n"
+    home_content += "```\n\n"
+
+    # Campaign setting entity sections (only if in campaign_setting mode)
+    if mode == "campaign_setting":
+        home_content += "## Races\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE size AS \"Size\", speed AS \"Speed\", asi AS \"ASI\"\n"
+        home_content += "FROM #Race\n"
+        home_content += "SORT file.name ASC\n"
+        home_content += "```\n\n"
+
+        home_content += "## Deities\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE alignment AS \"Alignment\", domains AS \"Domains\", symbol AS \"Symbol\"\n"
+        home_content += "FROM #Deity\n"
+        home_content += "SORT file.name ASC\n"
+        home_content += "```\n\n"
+
+        home_content += "## Spells\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE level AS \"Level\", school AS \"School\", classes AS \"Classes\"\n"
+        home_content += "FROM #Spell\n"
+        home_content += "SORT level ASC, file.name ASC\n"
+        home_content += "```\n\n"
+
+        home_content += "## Classes\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE base_class AS \"Base Class\", type AS \"Type\"\n"
+        home_content += "FROM #Class\n"
+        home_content += "SORT file.name ASC\n"
+        home_content += "```\n\n"
+
+        home_content += "## Backgrounds\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE skill_proficiencies AS \"Skills\"\n"
+        home_content += "FROM #Background\n"
+        home_content += "SORT file.name ASC\n"
+        home_content += "```\n\n"
+
+        home_content += "## Feats\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE prerequisite AS \"Prerequisite\"\n"
+        home_content += "FROM #Feat\n"
+        home_content += "SORT file.name ASC\n"
+        home_content += "```\n\n"
+
+        home_content += "## Factions\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE type AS \"Type\", base_of_operations AS \"Base\"\n"
+        home_content += "FROM #Faction\n"
+        home_content += "SORT file.name ASC\n"
+        home_content += "```\n\n"
+
+        home_content += "## Lore\n\n"
+        home_content += "```dataview\n"
+        home_content += "TABLE category AS \"Category\"\n"
+        home_content += "FROM #Lore\n"
+        home_content += "SORT file.name ASC\n"
+        home_content += "```\n"
 
     with open(home_path, "w", encoding="utf-8") as f:
         f.write(home_content)
