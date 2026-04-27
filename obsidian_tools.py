@@ -8,39 +8,54 @@ EXTRACTION_SYSTEM_PROMPT = """
 You are an AI assistant helping a Game Master.
 Review the provided TTRPG text and extract ALL key entities. The text may be from an adventure module, a campaign setting, a supplement, or a combination.
 
-Return a JSON object with TWO kinds of content:
+=== FIDELITY RULE (most important) ===
+You are a librarian, not an author. Every field value must be derived from the source text.
+- If the source does not explicitly state a field's content, use an empty string ("") or empty array ([]).
+- Do NOT infer motivations, invent secrets, or summarize creatively.
+- Do NOT fabricate mechanics, DCs, or "next steps" that aren't in the text.
+- High-risk fields that often tempt invention: `motivation`, `secret`, `next_steps`, and reading_order `note`. For each: leave empty unless the text states it directly.
+- The reading_order `note` field must paraphrase a TRIGGER stated in the source (e.g. "After party defeats the gnoll", "When players first enter the inn"), NOT your interpretation of why the GM should read it.
 
-1. CHAPTER-SCOPED content (adventure/narrative) — goes inside a "chapters" array.
-2. GLOBAL REFERENCE content (player options, bestiary, world lore) — goes in TOP-LEVEL arrays, NOT inside any chapter.
+=== SOURCE PAGE TRACKING ===
+The input text contains `--- Page N ---` markers. Every entity (chapter-scoped AND global) MUST include a `source_pages` field:
+- Single page: "12"
+- Range when an entity spans multiple pages: "12-15"
+- Empty string "" only if you genuinely cannot tell.
+This is NON-NEGOTIABLE — GMs need to verify against source.
+
+=== CONTENT CATEGORIES ===
+Return a JSON object with TWO kinds of content:
+1. CHAPTER-SCOPED content (adventure/narrative) — inside a "chapters" array.
+2. GLOBAL REFERENCE content (player options, bestiary, world lore) — TOP-LEVEL arrays, NOT inside any chapter.
 
 === CHAPTER-SCOPED ENTITIES (inside "chapters") ===
 
-Use these STRICT definitions — every scene goes in exactly ONE category:
-- ENCOUNTER: Any scene where the party faces an active challenge requiring dice rolls — combat, skill challenge, chase, puzzle, trap, or social conflict with mechanics.
-- EVENT: A pure narrative beat with no active dice-roll challenge — story transitions, chapter setup/intro, lore reveals, consequence text, or GM housekeeping notes.
-- LOCATION: A physical place the party can explore, distinct from the encounter that happens there. Only create a location if it has descriptive value beyond being "the room where encounter X happens."
-- Do NOT put the same scene in both encounters and events. If something has mechanics, it is an encounter only.
+Strict scene definitions — every scene goes in exactly ONE category:
+- ENCOUNTER: An active challenge requiring dice rolls — combat, skill challenge, chase, puzzle, trap, or social conflict with mechanics.
+- EVENT: A pure narrative beat with no dice-roll challenge — story transitions, intros, lore reveals, consequences.
+- LOCATION: A physical place worth describing beyond "the room where encounter X happens."
+- Never put the same scene in both encounters and events. If it has mechanics, it is an encounter.
 
-Each chapter: name, overview, reading_order (flat ordered list with {name, type: event|location|encounter, note}), npcs, locations, encounters, events, items, monsters.
+Each chapter: name, overview, source_pages, reading_order (flat ordered list with {name, type: event|location|encounter, note}), npcs, locations, encounters, events, items, monsters.
 
-NPC schema: {name, motivation, secret, statblock, location}
-Location schema: {name, description, encounters: [str], loot: [str], exits: [str]}
-Encounter schema: {name, read_aloud, description, mechanics, monsters: [str], npcs_present: [str]}
-Event schema: {name, read_aloud, description, mechanics, next_steps, npcs_present: [str]}
-Item schema: {name, rarity, description, mechanics}
-Monster (chapter) schema: {name, statblock}
+NPC schema: {name, motivation, secret, statblock, location, source_pages}
+Location schema: {name, description, encounters: [str], loot: [str], exits: [str], source_pages}
+Encounter schema: {name, read_aloud, description, mechanics, monsters: [str], npcs_present: [str], source_pages}
+Event schema: {name, read_aloud, description, mechanics, next_steps, npcs_present: [str], source_pages}
+Item schema: {name, rarity, description, mechanics, source_pages}
+Monster (chapter) schema: {name, statblock, source_pages}
 
-=== GLOBAL REFERENCE ENTITIES (top-level arrays, NOT inside chapters) ===
+=== GLOBAL REFERENCE ENTITIES (top-level arrays) ===
 
-races: {name, description, subraces: [str], asi: {STR,DEX,...}, speed, size, traits: [{name,description}], languages: [str], source_chapter}
-classes: {name, base_class, type: class|subclass, description, features: [{name,level,description}], source_chapter}
-spells: {name, level, school, casting_time, range, components, duration, classes: [str], description, higher_levels, source_chapter}
-deities: {name, title, alignment, domains: [str], symbol, worshippers, description, myths, appearance, personality, source_chapter}
-backgrounds: {name, description, skill_proficiencies: [str], tool_proficiencies: [str], languages, equipment: [str], feature: {name,description}, source_chapter}
-feats: {name, prerequisite, description, benefits: [str], source_chapter}
-factions: {name, type, description, goals, members: [str], base_of_operations, allies: [str], enemies: [str], source_chapter}
-lore_entries: {name, category: Cosmology|History|Culture|Geography, description, related_entities: [str], source_chapter}
-monsters (top-level bestiary): {name, statblock}
+races: {name, description, subraces: [str], asi: {STR,DEX,...}, speed, size, traits: [{name,description}], languages: [str], source_chapter, source_pages}
+classes: {name, base_class, type: class|subclass, description, features: [{name,level,description}], source_chapter, source_pages}
+spells: {name, level, school, casting_time, range, components, duration, classes: [str], description, higher_levels, source_chapter, source_pages}
+deities: {name, title, alignment, domains: [str], symbol, worshippers, description, myths, appearance, personality, source_chapter, source_pages}
+backgrounds: {name, description, skill_proficiencies: [str], tool_proficiencies: [str], languages, equipment: [str], feature: {name,description}, source_chapter, source_pages}
+feats: {name, prerequisite, description, benefits: [str], source_chapter, source_pages}
+factions: {name, type, description, goals, members: [str], base_of_operations, allies: [str], enemies: [str], source_chapter, source_pages}
+lore_entries: {name, category: Cosmology|History|Culture|Geography, description, related_entities: [str], source_chapter, source_pages}
+monsters (top-level bestiary): {name, statblock, source_pages}
 
 === RULES ===
 - Deities are NEVER NPCs. If worshipped / has domains+symbol → deities array.
@@ -99,24 +114,51 @@ def merge_entities(entity_dicts: list) -> dict:
                     chapter_map[chap_name][key] = []
 
             target = chapter_map[chap_name]
-            # Merge chapter-scoped entities by name
+            # Merge chapter-scoped entities by name.
+            # Dedupe: if an existing entry has empty source_pages and the new one
+            # has source_pages, replace it — we always want the citation.
             for key in CHAPTER_ENTITY_KEYS:
-                existing_names = {e.get("name", "").lower() for e in target[key] if isinstance(e, dict)}
+                existing_by_name = {
+                    e.get("name", "").lower(): i
+                    for i, e in enumerate(target[key])
+                    if isinstance(e, dict) and e.get("name", "").strip()
+                }
                 for entity in chapter.get(key, []):
-                    if isinstance(entity, dict):
-                        ename = entity.get("name", "").lower()
-                        if ename and ename not in existing_names:
-                            target[key].append(entity)
-                            existing_names.add(ename)
-
-        # Merge global entity arrays
-        for key in GLOBAL_ENTITY_KEYS + ["monsters"]:
-            for entity in entity_dict.get(key, []):
-                if isinstance(entity, dict):
+                    if not isinstance(entity, dict):
+                        continue
                     ename = entity.get("name", "").lower()
-                    if ename and ename not in seen_names[key]:
-                        merged[key].append(entity)
-                        seen_names[key].add(ename)
+                    if not ename:
+                        continue
+                    if ename in existing_by_name:
+                        idx = existing_by_name[ename]
+                        existing = target[key][idx]
+                        if not existing.get("source_pages") and entity.get("source_pages"):
+                            target[key][idx] = entity
+                    else:
+                        target[key].append(entity)
+                        existing_by_name[ename] = len(target[key]) - 1
+
+        # Merge global entity arrays — same source_pages preference rule.
+        for key in GLOBAL_ENTITY_KEYS + ["monsters"]:
+            existing_by_name = {
+                e.get("name", "").lower(): i
+                for i, e in enumerate(merged[key])
+                if isinstance(e, dict) and e.get("name", "").strip()
+            }
+            for entity in entity_dict.get(key, []):
+                if not isinstance(entity, dict):
+                    continue
+                ename = entity.get("name", "").lower()
+                if not ename:
+                    continue
+                if ename in existing_by_name:
+                    idx = existing_by_name[ename]
+                    if not merged[key][idx].get("source_pages") and entity.get("source_pages"):
+                        merged[key][idx] = entity
+                else:
+                    merged[key].append(entity)
+                    existing_by_name[ename] = len(merged[key]) - 1
+                    seen_names[key].add(ename)
 
     merged["chapters"] = list(chapter_map.values())
     
@@ -282,90 +324,6 @@ Conversion rules:
         "output_format": output_format,
         "instructions": "Convert the statblock to Nimble 2e using the reference material. Output Obsidian markdown matching the output_format.",
     }
-
-def extract_entities_heuristic(text: str) -> dict:
-    """
-    Fallback tool that uses heuristics (regex) to extract basic entities.
-    Very rudimentary. Best used when an LLM isn't available.
-    """
-    entities = {
-        "chapters": [{
-            "name": "Arc: Uncategorized",
-            "overview": "Auto-extracted content",
-            "npcs": [],
-            "locations": [],
-            "encounters": [],
-            "events": [],
-            "items": [],
-            "monsters": []
-        }],
-        "races": [],
-        "classes": [],
-        "spells": [],
-        "deities": [],
-        "backgrounds": [],
-        "feats": [],
-        "factions": [],
-        "lore_entries": []
-    }
-    chapter = entities["chapters"][0]
-    
-    lines = text.splitlines()
-    for line in lines:
-        lower_line = line.lower()
-        if "npc:" in lower_line or "**npc:**" in lower_line:
-            chapter["npcs"].append({"name": line.replace("NPC:", "").replace("**NPC:**", "").strip(), "motivation": "", "secret": "", "statblock": "", "location": ""})
-        elif "location:" in lower_line or "scene:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            chapter["locations"].append({"name": name, "description": "", "encounters": [], "loot": [], "exits": []})
-        elif "encounter:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            chapter["encounters"].append({"name": name, "description": "", "mechanics": "", "monsters": []})
-        elif "event:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            chapter["events"].append({"name": name, "description": "", "mechanics": "", "next_steps": ""})
-        elif "item:" in lower_line or "loot:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            chapter["items"].append({"name": name, "rarity": "", "description": "", "mechanics": ""})
-        # Global entity types
-        elif "race:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["races"].append({"name": name, "description": "", "subraces": [], "asi": {}, "speed": 30, "size": "Medium", "traits": [], "languages": [], "source_chapter": ""})
-        elif "spell:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["spells"].append({"name": name, "level": 0, "school": "", "casting_time": "", "range": "", "components": "", "duration": "", "classes": [], "description": "", "source_chapter": ""})
-        elif "deity:" in lower_line or "god:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["deities"].append({"name": name, "title": "", "alignment": "", "domains": [], "symbol": "", "worshippers": "", "description": "", "source_chapter": ""})
-        elif "class:" in lower_line or "subclass:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["classes"].append({"name": name, "base_class": "", "type": "class", "description": "", "features": [], "source_chapter": ""})
-        elif "background:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["backgrounds"].append({"name": name, "description": "", "skill_proficiencies": [], "tool_proficiencies": [], "source_chapter": ""})
-        elif "feat:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["feats"].append({"name": name, "prerequisite": "", "description": "", "benefits": [], "source_chapter": ""})
-        elif "faction:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["factions"].append({"name": name, "type": "", "description": "", "goals": "", "members": [], "source_chapter": ""})
-        elif "lore:" in lower_line:
-            name_part = line.split(":", 1)
-            name = name_part[1].strip() if len(name_part) > 1 else line.strip()
-            entities["lore_entries"].append({"name": name, "category": "", "description": "", "related_entities": [], "source_chapter": ""})
-            
-    return entities
 
 def enrich_with_references(entities: dict, reference_dirs: list[str]) -> dict:
     """
@@ -533,7 +491,14 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
         chap_dir.mkdir(parents=True, exist_ok=True)
         chap_filepath = chap_dir / chap_filename
         
-        chap_content = f"---\ntags: [Chapter]\n---\n\n# {chap_name}\n\n## Story Overview\n{chapter.get('overview', chapter.get('description', ''))}\n\n"
+        chap_pages = chapter.get("source_pages", "")
+        chap_content = f"---\ntags: [Chapter]\n"
+        if chap_pages:
+            chap_content += f"source_pages: {_yaml_escape(str(chap_pages))}\n"
+        chap_content += f"---\n\n# {chap_name}\n\n"
+        if chap_pages:
+            chap_content += f"*Source pages: {chap_pages}*\n\n"
+        chap_content += f"## Story Overview\n{chapter.get('overview', chapter.get('description', ''))}\n\n"
 
         child_links = {"Locations": [], "Encounters": [], "Events": [], "NPCs": [], "Items": [], "Monsters": []}
         reading_order = chapter.get("reading_order", [])
@@ -559,6 +524,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
                 if not filepath.exists():
                     content = f"---\ntags: [NPC]\n"
                     content += f"chapter: {_yaml_escape(chap_name)}\n"
+                    content += f"source_pages: {_yaml_escape(str(npc.get('source_pages', '')))}\n"
                     content += f"location: {_yaml_escape(npc.get('location', ''))}\n"
                     content += f"statblock: {_yaml_escape(npc.get('statblock', ''))}\n"
                     content += f"motivation: {_yaml_escape(npc.get('motivation', ''))}\n"
@@ -591,6 +557,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
                 if not filepath.exists():
                     content = f"---\ntags: [Location]\n"
                     content += f"chapter: {_yaml_escape(chap_name)}\n"
+                    content += f"source_pages: {_yaml_escape(str(loc.get('source_pages', '')))}\n"
                     content += f"---\n\n"
                     content += f"# {name}\n\n"
                     content += f"> {loc.get('description', '')}\n\n"
@@ -643,6 +610,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
 
                 content = f"---\ntags: [Encounter]\n"
                 content += f"chapter: {_yaml_escape(chap_name)}\n"
+                content += f"source_pages: {_yaml_escape(str(enc.get('source_pages', '')))}\n"
                 if monster_names:
                     content += f"monsters:\n"
                     for mn in monster_names:
@@ -724,6 +692,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
 
                 content = f"---\ntags: [Event]\n"
                 content += f"chapter: {_yaml_escape(chap_name)}\n"
+                content += f"source_pages: {_yaml_escape(str(evt.get('source_pages', '')))}\n"
                 if next_steps:
                     content += f"next_steps: {_yaml_escape(next_steps)}\n"
                 content += f"---\n\n"
@@ -772,6 +741,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
                 
                 content = f"---\ntags: [Item]\n"
                 content += f"chapter: {_yaml_escape(chap_name)}\n"
+                content += f"source_pages: {_yaml_escape(str(item.get('source_pages', '')))}\n"
                 content += f"rarity: {_yaml_escape(item.get('rarity', ''))}\n"
                 content += f"---\n\n"
                 content += f"# {name}\n\n"
@@ -806,6 +776,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
                 else:
                     content = f"---\ntags: [Monster, Bestiary]\n"
                     content += f"chapter: {_yaml_escape(chap_name)}\n"
+                    content += f"source_pages: {_yaml_escape(str(monster.get('source_pages', '')))}\n"
                     content += f"---\n\n"
                     content += f"# {name}\n\n"
                     content += f"{monster.get('statblock', '')}\n\n"
@@ -868,6 +839,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
                 asi = race.get("asi", {})
                 asi_str = ", ".join(f"{k} +{v}" for k, v in asi.items() if v) if isinstance(asi, dict) else str(asi)
                 content = f"---\ntags: [Race]\nsource_chapter: {_yaml_escape(race.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(race.get('source_pages', '')))}\n"
                 content += f"size: {race.get('size', 'Medium')}\nspeed: {race.get('speed', 30)}\n"
                 if isinstance(asi, dict) and asi:
                     content += "asi:\n"
@@ -904,6 +876,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
             filepath = cat_dir / f"{sanitize_filename(name)}.md"
             if not filepath.exists():
                 content = f"---\ntags: [Class]\nsource_chapter: {_yaml_escape(cls.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(cls.get('source_pages', '')))}\n"
                 content += f"base_class: {_yaml_escape(cls.get('base_class', ''))}\ntype: {cls.get('type', 'class')}\n"
                 content += f"---\n\n# {name}\n"
                 if cls.get("base_class"):
@@ -931,6 +904,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
                 lvl_label = "Cantrip" if lvl == 0 else f"{lvl}{'st' if lvl == 1 else 'nd' if lvl == 2 else 'rd' if lvl == 3 else 'th'}-level {school}"
                 classes = spell.get("classes", [])
                 content = f"---\ntags: [Spell]\nsource_chapter: {_yaml_escape(spell.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(spell.get('source_pages', '')))}\n"
                 content += f"level: {lvl}\nschool: {_yaml_escape(school)}\n"
                 content += f"casting_time: {_yaml_escape(spell.get('casting_time', ''))}\n"
                 content += f"range: {_yaml_escape(spell.get('range', ''))}\n"
@@ -966,6 +940,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
             if not filepath.exists():
                 domains = deity.get("domains", [])
                 content = f"---\ntags: [Deity]\nsource_chapter: {_yaml_escape(deity.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(deity.get('source_pages', '')))}\n"
                 content += f"alignment: {_yaml_escape(deity.get('alignment', ''))}\n"
                 if domains:
                     content += "domains:\n"
@@ -1001,6 +976,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
             filepath = cat_dir / f"{sanitize_filename(name)}.md"
             if not filepath.exists():
                 content = f"---\ntags: [Background]\nsource_chapter: {_yaml_escape(bg.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(bg.get('source_pages', '')))}\n"
                 skills = bg.get("skill_proficiencies", [])
                 if skills:
                     content += "skill_proficiencies:\n"
@@ -1035,6 +1011,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
             filepath = cat_dir / f"{sanitize_filename(name)}.md"
             if not filepath.exists():
                 content = f"---\ntags: [Feat]\nsource_chapter: {_yaml_escape(feat.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(feat.get('source_pages', '')))}\n"
                 content += f"prerequisite: {_yaml_escape(feat.get('prerequisite', ''))}\n"
                 content += f"---\n\n# {name}\n\n"
                 prereq = feat.get("prerequisite", "")
@@ -1059,6 +1036,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
             if not filepath.exists():
                 members = faction.get("members", [])
                 content = f"---\ntags: [Faction]\nsource_chapter: {_yaml_escape(faction.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(faction.get('source_pages', '')))}\n"
                 content += f"type: {_yaml_escape(faction.get('type', ''))}\n"
                 content += f"base_of_operations: {_yaml_escape(faction.get('base_of_operations', ''))}\n"
                 content += f"---\n\n# {name}\n\n{faction.get('description', '')}\n\n"
@@ -1088,6 +1066,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
             if not filepath.exists():
                 related = lore.get("related_entities", [])
                 content = f"---\ntags: [Lore]\nsource_chapter: {_yaml_escape(lore.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(lore.get('source_pages', '')))}\n"
                 content += f"category: {_yaml_escape(lore.get('category', ''))}\n"
                 content += f"---\n\n# {name}\n\n{lore.get('description', '')}\n\n"
                 if related:
@@ -1108,6 +1087,7 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
             if not filepath.exists():
                 content = f"---\ntags: [Monster, Bestiary]\n"
                 content += f"source_chapter: {_yaml_escape(monster.get('source_chapter', ''))}\n"
+                content += f"source_pages: {_yaml_escape(str(monster.get('source_pages', '')))}\n"
                 content += f"---\n\n# {name}\n\n"
                 statblock = monster.get("statblock", "")
                 if statblock:
@@ -1135,35 +1115,35 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
     # Dataview query blocks for chapter-scoped entities
     home_content += "## NPCs\n\n"
     home_content += "```dataview\n"
-    home_content += "TABLE location AS \"Location\", motivation AS \"Motivation\", chapter AS \"Chapter\"\n"
+    home_content += "TABLE location AS \"Location\", motivation AS \"Motivation\", chapter AS \"Chapter\", source_pages AS \"Pages\"\n"
     home_content += "FROM #NPC\n"
     home_content += "SORT chapter ASC, file.name ASC\n"
     home_content += "```\n\n"
 
     home_content += "## Encounters\n\n"
     home_content += "```dataview\n"
-    home_content += "TABLE monsters AS \"Monsters\", chapter AS \"Chapter\"\n"
+    home_content += "TABLE monsters AS \"Monsters\", chapter AS \"Chapter\", source_pages AS \"Pages\"\n"
     home_content += "FROM #Encounter\n"
     home_content += "SORT chapter ASC, file.name ASC\n"
     home_content += "```\n\n"
 
     home_content += "## Items & Loot\n\n"
     home_content += "```dataview\n"
-    home_content += "TABLE rarity AS \"Rarity\", chapter AS \"Chapter\"\n"
+    home_content += "TABLE rarity AS \"Rarity\", chapter AS \"Chapter\", source_pages AS \"Pages\"\n"
     home_content += "FROM #Item\n"
     home_content += "SORT rarity ASC, file.name ASC\n"
     home_content += "```\n\n"
 
     home_content += "## Bestiary\n\n"
     home_content += "```dataview\n"
-    home_content += "TABLE chapter AS \"Appears In\"\n"
+    home_content += "TABLE chapter AS \"Appears In\", source_pages AS \"Pages\"\n"
     home_content += "FROM #Monster\n"
     home_content += "SORT file.name ASC\n"
     home_content += "```\n\n"
 
     home_content += "## Locations\n\n"
     home_content += "```dataview\n"
-    home_content += "TABLE chapter AS \"Chapter\"\n"
+    home_content += "TABLE chapter AS \"Chapter\", source_pages AS \"Pages\"\n"
     home_content += "FROM #Location\n"
     home_content += "SORT chapter ASC, file.name ASC\n"
     home_content += "```\n\n"

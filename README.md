@@ -89,7 +89,6 @@ Writes the enriched data to disk as a nested Obsidian vault with:
 | `analyze_pdf` | Extract TOC and detect document type from a PDF |
 | `extract_pdf_text` | Extract raw text from a page range |
 | `extract_entities_with_llm` | LLM-powered entity extraction → structured JSON |
-| `extract_entities_with_heuristics` | Regex fallback when no LLM is available |
 | `enrich_entities` | Cross-reference entities against local reference material |
 | `generate_obsidian_markdown` | Write enriched entities as an Obsidian vault |
 | `query_references` | Search local reference markdown files |

@@ -2,7 +2,6 @@ import unittest
 import os
 import shutil
 from obsidian_tools import (
-    extract_entities_heuristic,
     enrich_with_references,
     generate_obsidian
 )
@@ -16,21 +15,6 @@ class TestObsidianTools(unittest.TestCase):
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
             
-    def test_extract_heuristic(self):
-        text = "NPC: Goblin King\nScene: Throneroom\nEncounter: Ambush\nEvent: The Floor Collapses\nItem: Crown of Rags"
-        entities = extract_entities_heuristic(text)
-        chapter = entities["chapters"][0]
-        self.assertEqual(len(chapter["npcs"]), 1)
-        self.assertEqual(chapter["npcs"][0]["name"], "Goblin King")
-        self.assertEqual(len(chapter["locations"]), 1)
-        self.assertEqual(chapter["locations"][0]["name"], "Throneroom")
-        self.assertEqual(len(chapter["encounters"]), 1)
-        self.assertEqual(chapter["encounters"][0]["name"], "Ambush")
-        self.assertEqual(len(chapter["events"]), 1)
-        self.assertEqual(chapter["events"][0]["name"], "The Floor Collapses")
-        self.assertEqual(len(chapter["items"]), 1)
-        self.assertEqual(chapter["items"][0]["name"], "Crown of Rags")
-        
     def test_enrich_with_references(self):
         entities = {
             "chapters": [{
@@ -352,35 +336,55 @@ class TestObsidianTools(unittest.TestCase):
             self.assertIn("FROM #Background", content)
             self.assertIn("FROM #Lore", content)
 
-    def test_heuristic_extracts_new_types(self):
-        """Verify extract_entities_heuristic recognizes global entity type lines."""
-        text = (
-            "Race: Elf\n"
-            "Spell: Fireball\n"
-            "Deity: Pelor\n"
-            "Class: Fighter\n"
-            "Background: Sage\n"
-            "Feat: Alert\n"
-            "Faction: Harpers\n"
-            "Lore: The Sundering\n"
-        )
-        entities = extract_entities_heuristic(text)
-        self.assertEqual(len(entities["races"]), 1)
-        self.assertEqual(entities["races"][0]["name"], "Elf")
-        self.assertEqual(len(entities["spells"]), 1)
-        self.assertEqual(entities["spells"][0]["name"], "Fireball")
-        self.assertEqual(len(entities["deities"]), 1)
-        self.assertEqual(entities["deities"][0]["name"], "Pelor")
-        self.assertEqual(len(entities["classes"]), 1)
-        self.assertEqual(entities["classes"][0]["name"], "Fighter")
-        self.assertEqual(len(entities["backgrounds"]), 1)
-        self.assertEqual(entities["backgrounds"][0]["name"], "Sage")
-        self.assertEqual(len(entities["feats"]), 1)
-        self.assertEqual(entities["feats"][0]["name"], "Alert")
-        self.assertEqual(len(entities["factions"]), 1)
-        self.assertEqual(entities["factions"][0]["name"], "Harpers")
-        self.assertEqual(len(entities["lore_entries"]), 1)
-        self.assertEqual(entities["lore_entries"][0]["name"], "The Sundering")
+    def test_source_pages_in_frontmatter(self):
+        """Every generated note should carry source_pages in YAML frontmatter."""
+        entities = {
+            "chapters": [{
+                "name": "Chapter 1",
+                "source_pages": "5-30",
+                "npcs": [{"name": "Alice", "motivation": "", "source_pages": "12"}],
+                "locations": [{"name": "Inn", "description": "", "source_pages": "8-9"}],
+                "encounters": [{"name": "Bandits", "description": "", "mechanics": "", "monsters": [], "source_pages": "15"}],
+                "events": [{"name": "Dawn", "description": "", "source_pages": "5"}],
+                "items": [{"name": "Sword", "description": "", "rarity": "rare", "source_pages": "20"}],
+                "monsters": [{"name": "Goblin", "statblock": "AC 12", "source_pages": "25"}],
+            }],
+            "races": [{"name": "Elf", "description": "", "size": "Medium", "speed": 30, "source_pages": "44-45"}],
+        }
+        generate_obsidian(entities, self.test_dir, mode="campaign_setting")
+
+        cases = [
+            ("Chapter 1/Chapter 1.md", "5-30"),
+            ("Chapter 1/NPCs/Alice.md", "12"),
+            ("Chapter 1/Locations/Inn.md", "8-9"),
+            ("Chapter 1/Encounters/Bandits.md", "15"),
+            ("Chapter 1/Events/Dawn.md", "5"),
+            ("Chapter 1/Items/Sword.md", "20"),
+            ("Chapter 1/Monsters/Goblin.md", "25"),
+            ("Races/Elf.md", "44-45"),
+        ]
+        for relpath, expected_pages in cases:
+            full = os.path.join(self.test_dir, relpath)
+            self.assertTrue(os.path.exists(full), f"Missing: {relpath}")
+            with open(full) as f:
+                content = f.read()
+            self.assertIn(f"source_pages: {expected_pages}", content,
+                          f"{relpath} should carry source_pages: {expected_pages}")
+
+    def test_dataview_tables_include_pages(self):
+        """_Home.md Dataview tables should surface source_pages as a Pages column."""
+        entities = {
+            "chapters": [{
+                "name": "Chapter 1",
+                "npcs": [], "locations": [], "encounters": [], "events": [],
+                "items": [], "monsters": []
+            }]
+        }
+        generate_obsidian(entities, self.test_dir)
+        with open(os.path.join(self.test_dir, "_Home.md")) as f:
+            content = f.read()
+        self.assertIn('source_pages AS "Pages"', content)
+
 
 if __name__ == "__main__":
     unittest.main()
