@@ -4,6 +4,57 @@ import json
 from pathlib import Path
 from reference_tools import query_reference
 
+EXTRACTION_SYSTEM_PROMPT = """
+You are an AI assistant helping a Game Master.
+Review the provided TTRPG text and extract ALL key entities. The text may be from an adventure module, a campaign setting, a supplement, or a combination.
+
+Return a JSON object with TWO kinds of content:
+
+1. CHAPTER-SCOPED content (adventure/narrative) — goes inside a "chapters" array.
+2. GLOBAL REFERENCE content (player options, bestiary, world lore) — goes in TOP-LEVEL arrays, NOT inside any chapter.
+
+=== CHAPTER-SCOPED ENTITIES (inside "chapters") ===
+
+Use these STRICT definitions — every scene goes in exactly ONE category:
+- ENCOUNTER: Any scene where the party faces an active challenge requiring dice rolls — combat, skill challenge, chase, puzzle, trap, or social conflict with mechanics.
+- EVENT: A pure narrative beat with no active dice-roll challenge — story transitions, chapter setup/intro, lore reveals, consequence text, or GM housekeeping notes.
+- LOCATION: A physical place the party can explore, distinct from the encounter that happens there. Only create a location if it has descriptive value beyond being "the room where encounter X happens."
+- Do NOT put the same scene in both encounters and events. If something has mechanics, it is an encounter only.
+
+Each chapter: name, overview, reading_order (flat ordered list with {name, type: event|location|encounter, note}), npcs, locations, encounters, events, items, monsters.
+
+NPC schema: {name, motivation, secret, statblock, location}
+Location schema: {name, description, encounters: [str], loot: [str], exits: [str]}
+Encounter schema: {name, read_aloud, description, mechanics, monsters: [str], npcs_present: [str]}
+Event schema: {name, read_aloud, description, mechanics, next_steps, npcs_present: [str]}
+Item schema: {name, rarity, description, mechanics}
+Monster (chapter) schema: {name, statblock}
+
+=== GLOBAL REFERENCE ENTITIES (top-level arrays, NOT inside chapters) ===
+
+races: {name, description, subraces: [str], asi: {STR,DEX,...}, speed, size, traits: [{name,description}], languages: [str], source_chapter}
+classes: {name, base_class, type: class|subclass, description, features: [{name,level,description}], source_chapter}
+spells: {name, level, school, casting_time, range, components, duration, classes: [str], description, higher_levels, source_chapter}
+deities: {name, title, alignment, domains: [str], symbol, worshippers, description, myths, appearance, personality, source_chapter}
+backgrounds: {name, description, skill_proficiencies: [str], tool_proficiencies: [str], languages, equipment: [str], feature: {name,description}, source_chapter}
+feats: {name, prerequisite, description, benefits: [str], source_chapter}
+factions: {name, type, description, goals, members: [str], base_of_operations, allies: [str], enemies: [str], source_chapter}
+lore_entries: {name, category: Cosmology|History|Culture|Geography, description, related_entities: [str], source_chapter}
+monsters (top-level bestiary): {name, statblock}
+
+=== RULES ===
+- Deities are NEVER NPCs. If worshipped / has domains+symbol → deities array.
+- Bestiary creatures with full stat blocks → top-level monsters, NOT inside chapters.
+- No chapter structure in text → empty "chapters" array.
+- No reference content → omit global arrays.
+- Narrative content without chapters → single chapter named "Arc: Uncategorized".
+- Return ONLY valid JSON. No markdown fences or extra text.
+
+Output structure:
+{"chapters": [...], "races": [...], "classes": [...], "spells": [...], "deities": [...], "backgrounds": [...], "feats": [...], "factions": [...], "lore_entries": [...], "monsters": [...]}
+Omit any top-level array that has no entries. Always include "chapters" even if empty.
+"""
+
 # All entity type keys that can appear at the top level (global) or inside chapters
 GLOBAL_ENTITY_KEYS = ["races", "classes", "spells", "deities", "backgrounds", "feats", "factions", "lore_entries"]
 CHAPTER_ENTITY_KEYS = ["npcs", "locations", "encounters", "events", "items", "monsters"]
@@ -81,103 +132,33 @@ def merge_entities(entity_dicts: list) -> dict:
 def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
     """
     Uses an LLM to extract entities from the raw adventure text.
+    System prompt is separated from user content to enable prompt caching.
     Returns a dictionary of structured data.
     """
-    prompt = f"""
-    You are an AI assistant helping a Game Master.
-    Review the following TTRPG text and extract ALL key entities. The text may be from an adventure module, a campaign setting, a supplement, or a combination.
-
-    Return a JSON object with TWO kinds of content:
-
-    1. CHAPTER-SCOPED content (adventure/narrative) — goes inside a "chapters" array.
-    2. GLOBAL REFERENCE content (player options, bestiary, world lore) — goes in TOP-LEVEL arrays, NOT inside any chapter.
-
-    === CHAPTER-SCOPED ENTITIES (inside "chapters") ===
-
-    Use these STRICT definitions — every scene goes in exactly ONE category:
-    - ENCOUNTER: Any scene where the party faces an active challenge requiring dice rolls — combat, skill challenge, chase, puzzle, trap, or social conflict with mechanics.
-    - EVENT: A pure narrative beat with no active dice-roll challenge — story transitions, chapter setup/intro, lore reveals, consequence text, or GM housekeeping notes.
-    - LOCATION: A physical place the party can explore, distinct from the encounter that happens there. Only create a location if it has descriptive value beyond being "the room where encounter X happens."
-    - Do NOT put the same scene in both encounters and events. If something has mechanics, it is an encounter only.
-
-    Each chapter should contain:
-    - name: "Chapter 1: The Beginning"
-    - overview: "A detailed narrative summary of the chapter's storyline and events"
-    - reading_order: A flat, ordered list reflecting the sequence a GM would read these documents during play. ONLY include types "location", "encounter", and "event". Each entry: {{"name": "...", "type": "event|location|encounter", "note": "One sentence: why the GM reads this now / what it triggers"}}
-    - npcs: [{{"name": "...", "motivation": "...", "secret": "...", "statblock": "...", "location": "..."}}]
-    - locations: [{{"name": "...", "description": "...", "encounters": ["..."], "loot": ["..."], "exits": ["..."]}}]
-    - encounters: [{{"name": "...", "read_aloud": "Exact text to read aloud to players, or empty string if none", "description": "Full GM-facing context: setup, what is really happening, tactics, branching outcomes", "mechanics": "All DCs, rolls, conditions, turn structure, success/failure consequences", "monsters": ["Monster Name"], "npcs_present": ["NPC Name"]}}]
-    - events: [{{"name": "...", "read_aloud": "Player-facing text if applicable, else empty string", "description": "Full GM text for this event including all context and options", "mechanics": "DCs, checks, triggers, conditions", "next_steps": "What happens after / branching paths", "npcs_present": ["NPC Name"]}}]
-    - items: [{{"name": "...", "rarity": "...", "description": "...", "mechanics": "..."}}]
-    - monsters: [{{"name": "...", "statblock": "Full text of the stat block if it is explicitly provided in the text"}}]
-
-    === GLOBAL REFERENCE ENTITIES (top-level arrays, NOT inside chapters) ===
-
-    These are reference content that exists outside any single chapter. Place them in the appropriate top-level array:
-
-    - RACES: Any playable species/race writeup. Capture ALL traits, ASIs, speeds, subraces. Schema: {{"name": "...", "description": "Full flavour/lore text", "subraces": ["..."], "asi": {{"STR": 0, "DEX": 0, ...}}, "speed": 30, "size": "Medium", "traits": [{{"name": "...", "description": "..."}}], "languages": ["..."], "source_chapter": "..."}}
-
-    - CLASSES: Class options, archetypes, subclasses. Capture all features by level. Schema: {{"name": "...", "base_class": "Bard", "type": "subclass|class", "description": "...", "features": [{{"name": "...", "level": 3, "description": "..."}}], "source_chapter": "..."}}
-
-    - SPELLS: Spell entries with full mechanics. Schema: {{"name": "...", "level": 0, "school": "Evocation", "casting_time": "1 action", "range": "Self", "components": "V, S", "duration": "Instantaneous", "classes": ["Cleric"], "description": "Full spell text", "higher_levels": "...", "source_chapter": "..."}}
-
-    - DEITIES: Divine beings, gods, patron spirits. NOT NPCs — use this type instead. Schema: {{"name": "...", "title": "...", "alignment": "...", "domains": ["Life"], "symbol": "...", "worshippers": "...", "description": "...", "myths": "...", "appearance": "...", "personality": "...", "source_chapter": "..."}}
-
-    - BACKGROUNDS: PC background options. Schema: {{"name": "...", "description": "...", "skill_proficiencies": ["..."], "tool_proficiencies": ["..."], "languages": 0, "equipment": ["..."], "feature": {{"name": "...", "description": "..."}}, "source_chapter": "..."}}
-
-    - FEATS: Feat writeups. Schema: {{"name": "...", "prerequisite": "...", "description": "...", "benefits": ["..."], "source_chapter": "..."}}
-
-    - FACTIONS: Only if clearly described as an organization. Schema: {{"name": "...", "type": "...", "description": "...", "goals": "...", "members": ["..."], "base_of_operations": "...", "allies": ["..."], "enemies": ["..."], "source_chapter": "..."}}
-
-    - LORE_ENTRIES: World history, creation myths, cosmological exposition that doesn't fit encounters or events. Schema: {{"name": "...", "category": "Cosmology|History|Culture|Geography", "description": "...", "related_entities": ["..."], "source_chapter": "..."}}
-
-    === IMPORTANT RULES ===
-    - Deities are NEVER NPCs. If a being is worshipped, has domains/symbols, it goes in "deities".
-    - Creatures with full stat blocks from a bestiary section go in top-level "monsters" array (same schema as chapter monsters), not inside a chapter.
-    - If the text has no chapter/adventure structure, use an empty "chapters" array.
-    - If the text has no reference content, omit or leave empty the global arrays.
-    - If the text doesn't explicitly have chapters, put narrative content under a single chapter named "Arc: Uncategorized".
-
-    Return ONLY valid JSON with this structure:
-    {{
-      "chapters": [...],
-      "races": [...],
-      "classes": [...],
-      "spells": [...],
-      "deities": [...],
-      "backgrounds": [...],
-      "feats": [...],
-      "factions": [...],
-      "lore_entries": [...],
-      "monsters": [...]
-    }}
-
-    Omit any top-level array that has no entries. Always include "chapters" even if empty.
-    Return ONLY valid JSON. Do not include markdown formatting or other text around the JSON.
-    Text to analyze:
-    {text}
-    """
-
     content = ""
     if provider.lower() == "gemini":
         try:
             from google import genai
+            from google.genai import types as genai_types
         except ImportError:
             return {"error": "google-genai SDK not installed"}
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             return {"error": "GEMINI_API_KEY environment variable not set"}
-        
+
         client = genai.Client(api_key=api_key)
         try:
             response = client.models.generate_content(
                 model='gemini-2.5-flash',
-                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=EXTRACTION_SYSTEM_PROMPT,
+                ),
+                contents=text,
             )
             content = response.text
         except Exception as e:
             return {"error": f"Failed to call Gemini API: {e}"}
-            
+
     elif provider.lower() == "claude":
         try:
             import anthropic
@@ -186,42 +167,49 @@ def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             return {"error": "ANTHROPIC_API_KEY environment variable not set"}
-            
+
         client = anthropic.Anthropic(api_key=api_key)
         try:
             message = client.messages.create(
-                model="claude-sonnet-4-5",
+                model="claude-sonnet-4-6",
                 max_tokens=16000,
-                messages=[{"role": "user", "content": prompt}]
+                system=[{
+                    "type": "text",
+                    "text": EXTRACTION_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": text}],
             )
             content = message.content[0].text
         except Exception as e:
             return {"error": f"Failed to call Claude API: {e}"}
-            
+
     elif provider.lower() == "openai":
         try:
             import openai
         except ImportError:
             return {"error": "openai SDK not installed. Please install it with: pip install openai"}
-        
+
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             return {"error": "OPENAI_API_KEY environment variable not set"}
-            
+
         try:
             client = openai.OpenAI(api_key=api_key)
             response = client.chat.completions.create(
                 model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}]
+                messages=[
+                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
             )
             content = response.choices[0].message.content
         except Exception as e:
             return {"error": f"Failed to call OpenAI API: {e}"}
-            
+
     else:
         return {"error": f"Unsupported provider: {provider}"}
-        
-    # Clean up code blocks if needed
+
     content = content.strip()
     if content.startswith("```json"):
         content = content[7:]
@@ -230,11 +218,70 @@ def extract_entities_llm(text: str, provider: str = "gemini") -> dict:
     if content.endswith("```"):
         content = content[:-3]
     content = content.strip()
-    
+
     try:
         return json.loads(content)
     except json.JSONDecodeError as e:
         return {"error": f"Failed to parse JSON: {e}", "raw": content}
+
+def convert_5e_to_nimble(statblock: str) -> dict:
+    """
+    Returns context for the calling LLM to convert a D&D 5e monster statblock to Nimble RPG 2e.
+    Loads Nimble 2e reference material and describes the required output format.
+    No LLM call is made — the calling LLM performs the conversion.
+    """
+    nimble_ref_dir = Path(__file__).parent / "references" / "nimble"
+    docs = []
+    for filepath in sorted(nimble_ref_dir.glob("*.md")):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                docs.append(f"--- {filepath.name} ---\n{f.read()}\n")
+        except Exception:
+            pass
+    nimble_reference = "\n".join(docs)
+
+    output_format = """Obsidian markdown with this exact structure:
+
+---
+tags: [Monster, Nimble, <role>]
+source_system: "D&D 5e (converted to Nimble 2e)"
+cr_original: <original CR>
+---
+
+# <Monster Name>
+
+> [!info]- Nimble Stat Block
+> **Level:** <level> | **Role:** <role> | **HP:** <hp> | **Armor:** <armor> | **Speed:** <speed>
+> **Saves:** <saves>
+> **Damage Traits:** <damage_traits>
+> **Condition Immunities:** <condition_immunities>
+> **Senses:** <senses>
+>
+> **Traits**
+> <Trait Name>. <description>
+>
+> **Actions**
+> <Action Name>. <description>
+
+> [!warning]- Conversion Notes
+> - <note line>
+
+Conversion rules:
+- level: max(1, CR)
+- armor: Unarmored (AC <=13), Medium Armor (AC 14-17), Heavy Armor (AC 18+)
+- role: pick from Melee / Ranged / Controller / Support / AoE / Summoner / Striker / Ambusher / Defender (can combine two)
+- saves: relevant saving throw bonuses
+- damage_traits: resistances, immunities, vulnerabilities in Nimble format
+- actions: converted from 5e attacks — add "hits unless roll of 1, crits on max die"
+- traits: passive abilities; legendary resistances become Boss traits
+- conversion_notes: flag anything requiring GM review"""
+
+    return {
+        "statblock": statblock,
+        "nimble_reference": nimble_reference,
+        "output_format": output_format,
+        "instructions": "Convert the statblock to Nimble 2e using the reference material. Output Obsidian markdown matching the output_format.",
+    }
 
 def extract_entities_heuristic(text: str) -> dict:
     """
@@ -377,6 +424,73 @@ def _yaml_escape(value: str) -> str:
         return f'"{escaped}"'
     return value
 
+
+def _render_nimble_monster(monster: dict, chap_name: str = "") -> str:
+    name = monster.get("name", "Unknown Monster")
+    tag = monster.get("tag_override", "Monster")
+    role = monster.get("role", "Unknown Role")
+
+    content = f"---\n"
+    content += f"tags: [{tag}, Nimble, {role}]\n"
+    content += f"source_system: \"D&D 5e (converted to Nimble 2e)\"\n"
+    content += f"cr_original: {_yaml_escape(str(monster.get('cr_original', '')))}\n"
+    if chap_name:
+        content += f"chapter: {_yaml_escape(chap_name)}\n"
+    content += f"---\n\n"
+    content += f"# {name}\n\n"
+
+    content += f"> [!info]- Nimble Stat Block\n"
+    content += f"> **Level:** {monster.get('level', '?')} | **Role:** {role} | **HP:** {monster.get('hp', '?')} | **Armor:** {monster.get('armor', '?')} | **Speed:** {monster.get('speed', '?')}\n"
+
+    saves = monster.get("saves", "—")
+    if isinstance(saves, list): saves = ", ".join(saves)
+    content += f"> **Saves:** {saves}\n"
+
+    damage_traits = monster.get("damage_traits", "—")
+    if damage_traits:
+        content += f"> **Damage Traits:** {damage_traits}\n"
+
+    cond_imm = monster.get("condition_immunities", "—")
+    if cond_imm:
+        content += f"> **Condition Immunities:** {cond_imm}\n"
+
+    senses = monster.get("senses", "—")
+    if senses:
+        content += f"> **Senses:** {senses}\n"
+
+    content += ">\n"
+
+    traits = monster.get("traits", [])
+    if traits:
+        content += "> **Traits**\n"
+        if isinstance(traits, list):
+            for t in traits:
+                if isinstance(t, dict):
+                    content += f"> {t.get('name', '')}. {t.get('description', '')}\n"
+                else:
+                    content += f"> {t}\n"
+        else:
+            content += f"> {traits}\n"
+        content += ">\n"
+
+    actions = monster.get("actions", [])
+    if actions:
+        content += "> **Actions**\n"
+        if isinstance(actions, list):
+            for a in actions:
+                if isinstance(a, dict):
+                    content += f"> {a.get('name', '')}. {a.get('description', '')}\n"
+                else:
+                    content += f"> {a}\n"
+        else:
+            content += f"> {actions}\n"
+
+    notes = monster.get("conversion_notes", "No mechanics flagged for review.")
+    content += f"\n> [!warning]- Conversion Notes\n"
+    for line in notes.splitlines():
+        content += f"> - {line}\n"
+
+    return content
 
 def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> list[str]:
     """
@@ -686,11 +800,15 @@ def generate_obsidian(entities: dict, output_dir: str, mode: str = "auto") -> li
                 filepath = cat_dir / filename
                 child_links["Monsters"].append(f"[[{name}]]")
                 
-                content = f"---\ntags: [Monster, Bestiary]\n"
-                content += f"chapter: {_yaml_escape(chap_name)}\n"
-                content += f"---\n\n"
-                content += f"# {name}\n\n"
-                content += f"{monster.get('statblock', '')}\n\n"
+                system = monster.get("system", "")
+                if "Nimble 2e" in system:
+                    content = _render_nimble_monster(monster, chap_name)
+                else:
+                    content = f"---\ntags: [Monster, Bestiary]\n"
+                    content += f"chapter: {_yaml_escape(chap_name)}\n"
+                    content += f"---\n\n"
+                    content += f"# {name}\n\n"
+                    content += f"{monster.get('statblock', '')}\n\n"
                 
                 if not filepath.exists():
                     with open(filepath, "w", encoding="utf-8") as f:

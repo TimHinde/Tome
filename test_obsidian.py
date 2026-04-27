@@ -179,6 +179,51 @@ class TestObsidianTools(unittest.TestCase):
             content = f.read()
             self.assertIn("chapter:", content)
 
+    def test_generate_nimble_monster(self):
+        """Verify Nimble 2e monsters get the correct callout format and frontmatter."""
+        entities = {
+            "chapters": [{
+                "name": "Nimble Test Chapter",
+                "monsters": [{
+                    "name": "Nimble Goblin",
+                    "system": "Nimble 2e",
+                    "role": "Skirmisher",
+                    "level": 1,
+                    "hp": 7,
+                    "armor": "Unarmored",
+                    "speed": "30 ft.",
+                    "damage_traits": "Vulnerable: Fire",
+                    "actions": ["Shortbow. Ranged attack (hits unless roll of 1, crits on max die). Hit: 3 piercing."],
+                    "conversion_notes": "Needs review"
+                }]
+            }]
+        }
+        
+        generate_obsidian(entities, self.test_dir)
+        chap_dir = os.path.join(self.test_dir, "Nimble Test Chapter")
+        monster_file = os.path.join(chap_dir, "Monsters", "Nimble Goblin.md")
+        
+        self.assertTrue(os.path.exists(monster_file))
+        with open(monster_file, "r") as f:
+            content = f.read()
+            
+            # Check custom tag
+            self.assertIn("tags: [Monster, Nimble, Skirmisher]", content)
+            self.assertIn('source_system: "D&D 5e (converted to Nimble 2e)"', content)
+            
+            # Check callout structure
+            self.assertIn("> [!info]- Nimble Stat Block", content)
+            self.assertIn("> **Level:** 1 | **Role:** Skirmisher | **HP:** 7 | **Armor:** Unarmored | **Speed:** 30 ft.", content)
+            self.assertIn("> **Damage Traits:** Vulnerable: Fire", content)
+            
+            # Check Actions list formatting
+            self.assertIn("> **Actions**", content)
+            self.assertIn("> Shortbow. Ranged attack", content)
+            
+            # Check conversion notes callout
+            self.assertIn("> [!warning]- Conversion Notes", content)
+            self.assertIn("> - Needs review", content)
+
     def test_campaign_setting_mode_global_folders(self):
         """Verify campaign_setting mode creates top-level global entity folders with correct frontmatter."""
         entities = {
