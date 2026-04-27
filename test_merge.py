@@ -80,6 +80,37 @@ class TestMergeEntities(unittest.TestCase):
         self.assertNotIn("spells", merged)
         self.assertNotIn("deities", merged)
 
+    def test_merge_prefers_entry_with_source_pages(self):
+        """When deduplicating, prefer the entry that has source_pages populated."""
+        dict1 = {
+            "chapters": [{
+                "name": "Chapter 1",
+                "npcs": [{"name": "Alice", "motivation": "From summary", "source_pages": ""}],
+                "locations": [], "encounters": [], "events": [], "items": [], "monsters": []
+            }]
+        }
+        dict2 = {
+            "chapters": [{
+                "name": "Chapter 1",
+                "npcs": [{"name": "Alice", "motivation": "From detailed page", "source_pages": "12-13"}],
+                "locations": [], "encounters": [], "events": [], "items": [], "monsters": []
+            }]
+        }
+        merged = merge_entities([dict1, dict2])
+        npcs = [c for c in merged["chapters"] if c["name"] == "Chapter 1"][0]["npcs"]
+        self.assertEqual(len(npcs), 1)
+        # The entry with source_pages should win, even though the empty one was first.
+        self.assertEqual(npcs[0]["source_pages"], "12-13")
+        self.assertEqual(npcs[0]["motivation"], "From detailed page")
+
+    def test_merge_global_prefers_entry_with_source_pages(self):
+        """Same source_pages preference rule applies to global arrays."""
+        dict1 = {"chapters": [], "races": [{"name": "Elf", "description": "v1", "source_pages": ""}]}
+        dict2 = {"chapters": [], "races": [{"name": "Elf", "description": "v2", "source_pages": "44"}]}
+        merged = merge_entities([dict1, dict2])
+        self.assertEqual(len(merged["races"]), 1)
+        self.assertEqual(merged["races"][0]["source_pages"], "44")
+
 
 if __name__ == "__main__":
     unittest.main()

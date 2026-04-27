@@ -13,7 +13,6 @@ from reference_tools import query_reference, list_reference_topics
 from pdf_tools import analyze_pdf_structure, extract_pdf_section, suggest_chunks
 from obsidian_tools import (
     extract_entities_llm,
-    extract_entities_heuristic,
     enrich_with_references,
     generate_obsidian,
     convert_5e_to_nimble,
@@ -93,13 +92,6 @@ def extract_entities_with_llm(text: str, provider: str = "gemini") -> dict:
     Requires GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY environment variables.
     """
     return extract_entities_llm(text, provider)
-
-@mcp.tool()
-def extract_entities_with_heuristics(text: str) -> dict:
-    """
-    Fallback tool that uses heuristics (regex) to extract basic entities when an LLM isn't available.
-    """
-    return extract_entities_heuristic(text)
 
 @mcp.tool()
 def enrich_entities(entities: dict, reference_dirs: list[str] = None) -> dict:
