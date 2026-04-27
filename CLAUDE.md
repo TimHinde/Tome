@@ -84,6 +84,8 @@ Local reference material is in `references/`. The D&D 5.2e SRD ships as default 
 
 > *This work includes material from the System Reference Document 5.2 ("SRD 5.2") by Wizards of the Coast LLC. Licensed under CC BY 4.0.*
 
+> *Tome is an independent product published under the Nimble 3rd Party Creator License. Nimble © Nimble Co. Tome is not affiliated with, endorsed by, or officially connected to Nimble Co. in any way.*
+
 ## Output Style
 
 GM notes should be punchy, bulleted, and action-focused. Prioritize "what you need to know right now" over flowing prose.
